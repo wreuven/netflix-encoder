@@ -649,13 +649,17 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.encoder2.close()
 
         elapsed = time.monotonic() - self.start_time if self.start_time else 0
-        duration = self.output_frame_count / 30.0
+        duration = self.output_frame_count / 25.0
 
-        # Convert to MP4
+        # Convert to MP4 with correct framerate (25fps)
         mp4_path = self.h264_path.with_suffix(".mp4")
         subprocess.run([
-            "ffmpeg", "-y", "-i", str(self.h264_path),
-            "-c:v", "copy", str(mp4_path)
+            "ffmpeg", "-y",
+            "-r", "25",  # Force 25fps output
+            "-i", str(self.h264_path),
+            "-c:v", "copy",
+            "-video_track_timescale", "25",
+            str(mp4_path)
         ], capture_output=True)
 
         # Calculate metrics
