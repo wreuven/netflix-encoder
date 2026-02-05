@@ -41,6 +41,7 @@ from frame_handler import BaseFrameHandler
 from h264_splicer import (
     parse_annexb, NALUnit, BitWriter, BitReader, SPS, PPS,
     rewrite_slice_header, add_emulation_prevention, parse_slice_header,
+    modify_sps_num_ref_frames,
 )
 from nvenc_encoder import NVENCEncoder
 
@@ -73,8 +74,12 @@ def bgra_to_nv12(bgra):
     return nv12
 
 
-def create_pskip_slice(first_mb, mb_count, frame_num, sps, nal_ref_idc=2):
-    """Create a P-slice with all P_Skip macroblocks."""
+def create_pskip_slice(first_mb, mb_count, frame_num, sps, nal_ref_idc=2, ref_ltr0=False):
+    """Create a P-slice with all P_Skip macroblocks.
+
+    Args:
+        ref_ltr0: If True, explicitly reference LTR 0 instead of default reference.
+    """
     w = BitWriter()
 
     w.write_ue(first_mb)
@@ -85,7 +90,15 @@ def create_pskip_slice(first_mb, mb_count, frame_num, sps, nal_ref_idc=2):
     w.write_bits(frame_num % (1 << frame_num_bits), frame_num_bits)
 
     w.write_bits(0, 1)  # num_ref_idx_active_override_flag
-    w.write_bits(0, 1)  # ref_pic_list_modification_flag_l0
+
+    if ref_ltr0:
+        # Explicitly reference LTR 0
+        w.write_bits(1, 1)  # ref_pic_list_modification_flag_l0 = 1
+        w.write_ue(2)       # modification_of_pic_nums_idc = 2 (long-term ref)
+        w.write_ue(0)       # long_term_pic_num = 0 (LTR 0)
+        w.write_ue(3)       # modification_of_pic_nums_idc = 3 (end)
+    else:
+        w.write_bits(0, 1)  # ref_pic_list_modification_flag_l0 = 0
 
     if nal_ref_idc > 0:
         w.write_bits(0, 1)  # adaptive_ref_pic_marking_mode_flag
@@ -256,6 +269,12 @@ class RegionEncoder:
     - Per-row slices for transplantation
     - No deblocking to prevent splice artifacts
     - Maintains encoder state for I/P frame production
+
+    For P-frames to work when transplanted, the padding pixels must match
+    what the decoder sees as the reference. We achieve this by:
+    1. Storing the padding pixels when we produce an IDR
+    2. Reusing those SAME padding pixels for subsequent P-frames
+    This ensures encoder2's reference matches its input for the padding area.
     """
 
     def __init__(self, output_dir):
@@ -269,6 +288,15 @@ class RegionEncoder:
         # Cache of SPS/PPS by region size (width, height) -> (sps, pps)
         self._sps_pps_cache = {}
         self._last_region_size = None
+
+        # Store padding pixels from IDR frame for reuse in P-frames
+        # This ensures encoder2's reference padding matches input padding
+        self._cached_padding = None  # (top, bottom, left, right) strips
+        self._cached_padding_bounds = None  # (padded_x, padded_y, padded_w, padded_h, video_x, video_y, video_w, video_h)
+
+        # Debug: write raw encoder2 output to file
+        self._debug_file = open(output_dir / "encoder2_debug.h264", "wb")
+        self._debug_sps_written = False
 
     def _get_encoder(self, width, height):
         """Get or create encoder for given region size."""
@@ -288,6 +316,11 @@ class RegionEncoder:
     def encode_region(self, pixels, region_x, region_y, region_w, region_h, force_idr=False):
         """
         Encode a region with 1 MB background padding.
+
+        For P-frames to work correctly when transplanted, we reuse the padding
+        pixels from the IDR frame. This ensures encoder2's reference padding
+        matches the input padding, so motion vectors into the padding area
+        reference the correct content.
 
         Returns: (slices, region_info) or (None, None) on failure
                  region_info = (sps, pps, mb_x, mb_y, mb_w, mb_h)
@@ -309,16 +342,47 @@ class RegionEncoder:
         if padded_w < 32 or padded_h < 32:
             return None, None
 
-        # Extract region (BGRA)
-        region_bgra = pixels[padded_y:padded_y+padded_h, padded_x:padded_x+padded_w]
+        # Video region within padded area (excluding padding)
+        video_x_in_padded = (region_x // 16) * 16 - padded_x
+        video_y_in_padded = (region_y // 16) * 16 - padded_y
+        video_w_in_padded = ((region_x + region_w + 15) // 16) * 16 - (region_x // 16) * 16
+        video_h_in_padded = ((region_y + region_h + 15) // 16) * 16 - (region_y // 16) * 16
+
+        # Extract full padded region from current frame
+        region_bgra = pixels[padded_y:padded_y+padded_h, padded_x:padded_x+padded_w].copy()
+
+        # Check if we need IDR
+        current_size = (padded_w, padded_h)
+        size_changed = (current_size != self._last_region_size)
+        no_sps_pps = (current_size not in self._sps_pps_cache)
+        need_idr = force_idr or size_changed or no_sps_pps
+
+        # NOTE: Padding caching disabled for debugging position issue
+        # if need_idr:
+        #     # Store the padding pixels for reuse in subsequent P-frames
+        #     # This ensures encoder2's reference matches input for P-frames
+        #     self._cached_padding = region_bgra.copy()
+        #     self._cached_padding_bounds = (padded_x, padded_y, padded_w, padded_h,
+        #                                    video_x_in_padded, video_y_in_padded,
+        #                                    video_w_in_padded, video_h_in_padded)
+        # elif self._cached_padding is not None and self._cached_padding_bounds is not None:
+        #     # For P-frames: use cached padding, but update the video region with current content
+        #     cached_bounds = self._cached_padding_bounds
+        #     if (padded_x == cached_bounds[0] and padded_y == cached_bounds[1] and
+        #         padded_w == cached_bounds[2] and padded_h == cached_bounds[3]):
+        #         # Same bounds - reuse cached padding for border, update video region
+        #         vx, vy = cached_bounds[4], cached_bounds[5]
+        #         vw, vh = cached_bounds[6], cached_bounds[7]
+        #
+        #         # Start with cached frame (has correct padding)
+        #         region_bgra = self._cached_padding.copy()
+        #         # Update only the video region with current pixels
+        #         current_video = pixels[padded_y+vy:padded_y+vy+vh, padded_x+vx:padded_x+vx+vw]
+        #         region_bgra[vy:vy+vh, vx:vx+vw] = current_video
 
         # Convert to NV12
         nv12 = bgra_to_nv12(region_bgra)
 
-        # Check if region size changed (need IDR for new size)
-        current_size = (padded_w, padded_h)
-        # TEMPORARY: Always force IDR for debugging
-        need_idr = True
         self._last_region_size = current_size
 
         # Get encoder for this size
@@ -326,6 +390,9 @@ class RegionEncoder:
 
         # Encode
         bitstream = encoder.encode(nv12, force_idr=need_idr)
+
+        # Debug: write raw encoder output to file
+        self._debug_file.write(bitstream)
 
         # Parse NAL units
         nals = parse_annexb(bitstream)
@@ -374,6 +441,11 @@ class RegionEncoder:
             encoder.close()
         self._encoders.clear()
         self._sps_pps_cache.clear()
+        self._cached_padding = None
+        self._cached_padding_bounds = None
+        if self._debug_file:
+            self._debug_file.close()
+            self._debug_file = None
 
 
 class StitchedFrameBuilder:
@@ -410,7 +482,7 @@ class StitchedFrameBuilder:
         for row in range(self.height_mbs):
             first_mb = row * self.width_mbs
             output_nals.append(create_pskip_slice(
-                first_mb, self.width_mbs, self.frame_num, self.sps
+                first_mb, self.width_mbs, self.frame_num, self.sps, ref_ltr0=True
             ))
 
         return output_nals
@@ -457,7 +529,7 @@ class StitchedFrameBuilder:
                 # Left P_Skip (before region)
                 if region_mb_x > 0:
                     output_nals.append(create_pskip_slice(
-                        first_mb, region_mb_x, frame_num, self.sps
+                        first_mb, region_mb_x, frame_num, self.sps, ref_ltr0=True
                     ))
 
                 # Transplanted region slice
@@ -489,7 +561,7 @@ class StitchedFrameBuilder:
                 else:
                     # No slice for this row, use P_Skip
                     output_nals.append(create_pskip_slice(
-                        first_mb + region_mb_x, region_mb_w, frame_num, self.sps
+                        first_mb + region_mb_x, region_mb_w, frame_num, self.sps, ref_ltr0=True
                     ))
                     if debug:
                         print(f"[STITCH] WARNING: Missing region slice for local_row={region_local_row}")
@@ -498,12 +570,12 @@ class StitchedFrameBuilder:
                 right_start = region_mb_x + region_mb_w
                 if right_start < self.width_mbs:
                     output_nals.append(create_pskip_slice(
-                        first_mb + right_start, self.width_mbs - right_start, frame_num, self.sps
+                        first_mb + right_start, self.width_mbs - right_start, frame_num, self.sps, ref_ltr0=True
                     ))
             else:
                 # Full row P_Skip
                 output_nals.append(create_pskip_slice(
-                    first_mb, self.width_mbs, frame_num, self.sps
+                    first_mb, self.width_mbs, frame_num, self.sps, ref_ltr0=True
                 ))
 
         if debug:
@@ -686,6 +758,10 @@ class LiveSpliceHandler(BaseFrameHandler):
             if not include_sps_pps and nal.nal_unit_type in (7, 8) and self.sps_pps_written:
                 continue
 
+            # Modify SPS to allow 2 reference frames (needed for LTR 0 + short-term)
+            if nal.nal_unit_type == 7:
+                nal = modify_sps_num_ref_frames(nal, 2)
+
             data = b'\x00\x00\x00\x01' + nal.to_bytes()
             self.output_file.write(data)
             self.total_bytes += len(data)
@@ -757,6 +833,10 @@ class LiveSpliceHandler(BaseFrameHandler):
         # P_Skip frames have no encoder output (generated programmatically)
         self._current_enc_hash = 'pskip'
 
+        # After an unchanged frame, encoder2's reference chain is broken
+        # (decoder will use this P_Skip frame as reference, not encoder2's last output)
+        self.encoder2_needs_idr = True
+
         sps, pps = self.encoder1.get_sps_pps()
 
         if sps is None:
@@ -824,6 +904,13 @@ class LiveSpliceHandler(BaseFrameHandler):
             self._current_enc_hash = '-'
 
         if slices and region_info:
+            # Debug: check if slices are I or P
+            i_slices = sum(1 for s in slices if s.nal_unit_type == 5)
+            p_slices = sum(1 for s in slices if s.nal_unit_type == 1)
+            if 400 <= self.frame_count <= 420:
+                slice_types = [s.nal_unit_type for s in slices[:3]]
+                print(f"[ENC2] frame={self.frame_count} slices: {len(slices)} total, {i_slices} IDR, {p_slices} non-IDR, first_types={slice_types}")
+
             # Build stitched frame with P_Skip + transplanted region
             debug_frame = (self.frame_count in (400, 401, 402, 540, 541, 542))
             nals = self.frame_builder.build_spliced_frame(slices, region_info, sps, debug=debug_frame)
