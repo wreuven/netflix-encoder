@@ -104,9 +104,8 @@ class FullFrameEncoder:
 
     Uses persistent NVENC encoder with bitstream post-processing for LTR 0:
     - First frame is IDR, marked as LTR 0
-    - Consecutive frames are P-frames, marked as LTR 0
-    - When resuming after stitched frames: P-frame references LTR 0 (not IDR!)
-    - All frames are post-processed to mark as LTR 0
+    - All P-frames reference LTR 0 and are then marked as new LTR 0
+    - This creates a chain: each frame refs previous LTR 0, becomes new LTR 0
     """
 
     def __init__(self, width, height, output_dir):
@@ -190,7 +189,8 @@ class FullFrameEncoder:
         """
         # Only force IDR for the very first frame
         force_idr = (self.sps is None)
-        need_ltr_ref = (self.stitched_frames_since_last_encode > 0)
+        # Always reference LTR 0 for P-frames (since every frame is marked as LTR 0)
+        need_ltr_ref = True
 
         # Convert BGRA to NV12
         nv12 = bgra_to_nv12(pixels)
@@ -766,7 +766,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         print(f"    Total encodes:  {self.encoder1.encode_count}")
         print(f"    IDR frames:     {self.encoder1.idr_count}")
         print(f"    P frames:       {self.encoder1.p_count}")
-        print(f"    LTR 0 refs:     {self.encoder1.ltr_ref_count}  (P-frames referencing LTR 0 after stitched)")
+        print(f"    LTR 0 refs:     {self.encoder1.ltr_ref_count}  (all P-frames reference LTR 0)")
         print()
         print("  Encoder 2 (Region) Statistics:")
         print(f"    Total encodes:  {self.encoder2.encode_count}")
