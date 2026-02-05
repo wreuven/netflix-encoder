@@ -40,7 +40,7 @@ sys.path.insert(0, str(SPLICER_PATH))
 from frame_handler import BaseFrameHandler
 from h264_splicer import (
     parse_annexb, NALUnit, BitWriter, BitReader, SPS, PPS,
-    rewrite_slice_header, add_emulation_prevention,
+    rewrite_slice_header, add_emulation_prevention, parse_slice_header,
 )
 from nvenc_encoder import NVENCEncoder
 
@@ -102,10 +102,11 @@ class FullFrameEncoder:
     """
     Encoder Context 1: Full-frame encoder for "changed" frames.
 
-    Uses persistent NVENC encoder for proper I/P frame production:
-    - First frame is IDR
-    - Consecutive frames are P-frames
-    - Forces IDR when resuming after stitched frames (LTR 0 equivalent)
+    Uses persistent NVENC encoder with bitstream post-processing for LTR 0:
+    - First frame is IDR, marked as LTR 0
+    - Consecutive frames are P-frames, marked as LTR 0
+    - When resuming after stitched frames: P-frame references LTR 0 (not IDR!)
+    - All frames are post-processed to mark as LTR 0
     """
 
     def __init__(self, width, height, output_dir):
@@ -118,7 +119,6 @@ class FullFrameEncoder:
 
         # Create persistent NVENC encoder
         # slice_mode=3 means total number of slices = height_mbs (one per row)
-        # This matches what we need for the full frame
         self._encoder = NVENCEncoder(
             width, height,
             slice_mode=3,  # Total number of slices
@@ -135,19 +135,62 @@ class FullFrameEncoder:
         self.encode_count = 0
         self.idr_count = 0
         self.p_count = 0
+        self.ltr_ref_count = 0  # Count of frames that referenced LTR 0
 
     def notify_stitched_frame(self):
         """Called when a stitched frame is output instead of encoder output."""
         self.stitched_frames_since_last_encode += 1
 
+    def _rewrite_slice_for_ltr0(self, nal, ref_ltr0=False):
+        """
+        Rewrite slice header to:
+        1. Mark this frame as LTR 0 (always)
+        2. Reference LTR 0 instead of short-term ref (if ref_ltr0=True)
+        """
+        is_idr = nal.nal_unit_type == 5
+
+        # Parse original slice header to get values to preserve
+        header, _ = parse_slice_header(nal, self.sps, self.pps)
+
+        # Determine dec_ref_pic_marking for LTR 0
+        if is_idr:
+            # For IDR: set long_term_reference_flag=1
+            marking = {'long_term': True}
+        else:
+            # For non-IDR: use MMCO 6 to mark as LTR 0
+            # MMCO 6 = mark current picture as long-term with index 0
+            marking = {'mmco': [(6, 0)]}
+
+        # Determine ref_pic_list_modification
+        if ref_ltr0 and not is_idr:
+            # Reference LTR 0 instead of short-term reference
+            ref_mod = {'type': 'long_term', 'idx': 0}
+        else:
+            ref_mod = None  # Keep default reference
+
+        # Rewrite the slice header
+        rewritten = rewrite_slice_header(
+            nal, self.sps, self.pps,
+            new_first_mb=header.first_mb_in_slice,
+            new_idc=header.disable_deblocking_filter_idc,
+            new_frame_num=None,  # Keep original
+            new_ref_pic_list_mod=ref_mod,
+            new_dec_ref_pic_marking=marking,
+        )
+
+        return rewritten
+
     def encode(self, pixels):
         """
-        Encode full frame.
+        Encode full frame with LTR 0 post-processing.
 
-        If returning after stitched frames, forces IDR (LTR 0 equivalent).
+        - Always marks output as LTR 0
+        - When resuming after stitched frames: references LTR 0 (efficient P-frame)
         Returns: list of NAL units
         """
-        force_idr = (self.sps is None or self.stitched_frames_since_last_encode > 0)
+        # Only force IDR for the very first frame
+        force_idr = (self.sps is None)
+        need_ltr_ref = (self.stitched_frames_since_last_encode > 0)
 
         # Convert BGRA to NV12
         nv12 = bgra_to_nv12(pixels)
@@ -158,26 +201,37 @@ class FullFrameEncoder:
         # Parse NAL units
         nals = parse_annexb(bitstream)
 
-        # Extract SPS/PPS and update state
+        # Extract SPS/PPS
+        output_nals = []
         for nal in nals:
             if nal.nal_unit_type == 7:
                 self.sps = SPS.from_rbsp(nal.rbsp)
+                output_nals.append(nal)
             elif nal.nal_unit_type == 8:
                 self.pps = PPS.from_rbsp(nal.rbsp)
+                output_nals.append(nal)
+            elif nal.nal_unit_type in (1, 5):
+                # Rewrite slice to mark as LTR 0 (and ref LTR 0 if needed)
+                rewritten = self._rewrite_slice_for_ltr0(nal, ref_ltr0=need_ltr_ref)
+                output_nals.append(rewritten)
+            else:
+                output_nals.append(nal)
 
         # Track frame types
-        has_idr = any(n.nal_unit_type == 5 for n in nals)
+        has_idr = any(n.nal_unit_type == 5 for n in output_nals)
         if has_idr:
             self.frame_num = 0
             self.idr_count += 1
         else:
             self.frame_num = (self.frame_num + 1) % (1 << (self.sps.log2_max_frame_num_minus4 + 4))
             self.p_count += 1
+            if need_ltr_ref:
+                self.ltr_ref_count += 1
 
         self.stitched_frames_since_last_encode = 0
         self.encode_count += 1
 
-        return nals
+        return output_nals
 
     def get_sps_pps(self):
         """Return current SPS/PPS for stitched frame generation."""
@@ -678,6 +732,7 @@ class LiveSpliceHandler(BaseFrameHandler):
             "encoder1_encodes": self.encoder1.encode_count,
             "encoder1_idr": self.encoder1.idr_count,
             "encoder1_p": self.encoder1.p_count,
+            "encoder1_ltr_refs": self.encoder1.ltr_ref_count,
             "encoder2_encodes": self.encoder2.encode_count,
             "category_counts": dict(self.category_counts),
             "output_type_counts": dict(self.output_type_counts),
@@ -711,6 +766,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         print(f"    Total encodes:  {self.encoder1.encode_count}")
         print(f"    IDR frames:     {self.encoder1.idr_count}")
         print(f"    P frames:       {self.encoder1.p_count}")
+        print(f"    LTR 0 refs:     {self.encoder1.ltr_ref_count}  (P-frames referencing LTR 0 after stitched)")
         print()
         print("  Encoder 2 (Region) Statistics:")
         print(f"    Total encodes:  {self.encoder2.encode_count}")

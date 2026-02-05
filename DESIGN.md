@@ -472,39 +472,83 @@ Frame 105: [video_only] → Stitched: P_Skip + region slices, refs 104
 **Key insight:** Stitched frames always reference the previous decoded frame (simple).
 Only Encoder 1 needs the LTR 0 mechanism when resuming after stitched frames.
 
-### Implementation Notes
+### Implementation: Bitstream Post-Processing for LTR 0
 
-**Encoder 1 state tracking:**
+The encoder (NVENC or x264) doesn't need special LTR support. Instead, we **post-process
+the encoded bitstream** to implement LTR 0 marking and referencing. This is the same
+approach used for slice transplantation - rewriting slice headers after encoding.
+
+**Two operations are needed:**
+
+1. **Mark frame as LTR 0**: Modify `dec_ref_pic_marking()` in the slice header
+2. **Reference LTR 0**: Modify `ref_pic_list_modification()` in the slice header
+
+#### Marking a Frame as LTR 0
+
+In `dec_ref_pic_marking()`, we add Memory Management Control Operation (MMCO) commands:
+
+```
+dec_ref_pic_marking() {
+    if (nal_unit_type == 5) {  // IDR
+        no_output_of_prior_pics_flag    u(1)
+        long_term_reference_flag        u(1)  // Set to 1 for LTR
+    } else {
+        adaptive_ref_pic_marking_mode_flag  u(1)  // Set to 1
+        // MMCO commands:
+        memory_management_control_operation ue(v)  // 6 = mark current as LTR
+        long_term_frame_idx                 ue(v)  // 0 = LTR index 0
+        memory_management_control_operation ue(v)  // 0 = end
+    }
+}
+```
+
+**MMCO 6** = "Mark current picture as long-term reference with index N"
+
+#### Referencing LTR 0 Instead of Short-Term Reference
+
+When resuming after stitched frames, modify `ref_pic_list_modification()`:
+
+```
+ref_pic_list_modification() {
+    ref_pic_list_modification_flag_l0   u(1)  // Set to 1
+    // Modification commands:
+    modification_of_pic_nums_idc        ue(v)  // 2 = use long_term_pic_num
+    long_term_pic_num                   ue(v)  // 0 = LTR index 0
+    modification_of_pic_nums_idc        ue(v)  // 3 = end
+}
+```
+
+**modification_of_pic_nums_idc=2** = "Use long-term reference with index N"
+
+#### Post-Processing Flow
+
 ```python
 class FullFrameEncoder:
-    def __init__(self):
-        self.frames_since_encoder_output = 0
-
     def encode(self, pixels):
-        if self.frames_since_encoder_output > 0:
-            # Returning after stitched frames - must ref LTR 0
-            frame = self._encode_with_ltr0_ref(pixels)
-        else:
-            # Consecutive encode - normal short-term ref is valid
-            frame = self._encode_normal(pixels)
+        # 1. Encode with NVENC (produces normal P-frame)
+        bitstream = self._nvenc.encode(pixels)
+        nals = parse_annexb(bitstream)
 
-        # Always store as LTR 0
-        self._store_as_ltr0(frame)
-        self.frames_since_encoder_output = 0
-        return frame
+        # 2. Find slice NALs and rewrite headers
+        for nal in nals:
+            if nal.nal_unit_type in (1, 5):  # Slice
+                if self.stitched_frames_since_last_encode > 0:
+                    # Rewrite to reference LTR 0 instead of short-term ref
+                    nal = rewrite_to_ref_ltr0(nal)
 
-    def notify_stitched_frame(self):
-        # Called when a stitched frame is output instead of us
-        self.frames_since_encoder_output += 1
+                # Rewrite to mark this frame as LTR 0
+                nal = rewrite_to_mark_ltr0(nal)
+
+        self.stitched_frames_since_last_encode = 0
+        return nals
 ```
 
-**x264 LTR configuration:**
-```bash
-# Enable LTR with 1 frame buffer
-x264 --ref 1 --b-adapt 0 --bframes 0 \
-     --rc-lookahead 0 \
-     --x264opts "ltr=1"
-```
+#### Why Bitstream Modification?
+
+1. **Encoder independence**: Works with any encoder (NVENC, x264, etc.)
+2. **Existing infrastructure**: Uses same slice header rewriting as transplantation
+3. **No encoder API complexity**: Don't need per-frame encoder control
+4. **Proven approach**: Same technique used successfully for splice operations
 
 ### Stitched Frame References
 
