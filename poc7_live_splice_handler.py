@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -633,14 +634,13 @@ class LiveSpliceHandler(BaseFrameHandler):
         # Once we start video overlay, unchanged frames are skipped (VFR output)
         self.in_video_overlay_mode = False
         self.input_frame_index = 0  # Tracks input frame position for timestamp calculation
-        self.frame_pts_list = []  # PTS for each output frame
 
-        # Output: raw H.264 (for debugging) + VFR MKV via mkvmerge at close
-        self.h264_path = self.output_dir / "live_spliced.h264"
+        # Output: direct VFR MKV via PyAV
         self.mkv_path = self.output_dir / "live_spliced.mkv"
-        self.h264_file = None
+        self.output_container = None
+        self.output_stream = None
         self.total_bytes = 0
-        self.sps_pps_written = False
+        self.extradata_set = False
 
         # Map file for frame metadata
         self.map_path = self.output_dir / "poc7_framemap.csv"
@@ -753,32 +753,55 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.drop_count = count
 
     def _write_nals(self, nals, include_sps_pps=False):
-        """Write NAL units to raw H.264 file, track timestamps for VFR MKV."""
+        """Write NAL units directly to VFR MKV."""
         import hashlib
 
-        if self.h264_file is None:
-            self.h264_file = open(self.h264_path, "wb")
-
+        # Build frame data (Annex B format)
         frame_bytes = b''
-        for nal in nals:
-            # Skip duplicate SPS/PPS
-            if not include_sps_pps and nal.nal_unit_type in (7, 8) and self.sps_pps_written:
-                continue
+        sps_data = None
+        pps_data = None
 
+        for nal in nals:
             # Modify SPS to allow 2 reference frames
             if nal.nal_unit_type == 7:
                 nal = modify_sps_num_ref_frames(nal, 2)
+                sps_data = nal.to_bytes()
+            elif nal.nal_unit_type == 8:
+                pps_data = nal.to_bytes()
 
             data = b'\x00\x00\x00\x01' + nal.to_bytes()
-            self.h264_file.write(data)
-            self.total_bytes += len(data)
             frame_bytes += data
+            self.total_bytes += len(data)
 
-            if nal.nal_unit_type in (7, 8):
-                self.sps_pps_written = True
+        # Initialize output container once we have SPS/PPS
+        if self.output_container is None and sps_data and pps_data:
+            self.output_container = av.open(str(self.mkv_path), mode="w")
+            self.output_stream = self.output_container.add_stream("h264")
+            self.output_stream.width = self.enc_width
+            self.output_stream.height = self.enc_height
+            self.output_stream.time_base = Fraction(1, 1000)  # milliseconds
+            self.output_stream.codec_context.extradata = (
+                b'\x00\x00\x00\x01' + sps_data +
+                b'\x00\x00\x00\x01' + pps_data
+            )
+            self.extradata_set = True
 
-        # Track PTS for VFR (input frame index)
-        self.frame_pts_list.append(self.input_frame_index)
+        if not frame_bytes or self.output_container is None:
+            return
+
+        # Create packet with VFR timestamp (milliseconds)
+        pkt = av.Packet(frame_bytes)
+        pkt.stream = self.output_stream
+        pkt.pts = self.input_frame_index * 40  # 40ms per frame at 25fps
+        pkt.dts = pkt.pts
+        pkt.time_base = self.output_stream.time_base
+
+        # Set keyframe flag
+        is_idr = any(n.nal_unit_type == 5 for n in nals)
+        if is_idr:
+            pkt.is_keyframe = True
+
+        self.output_container.mux(pkt)
 
         self._current_out_hash = hashlib.md5(frame_bytes).hexdigest()[:8]
         self.output_frame_count += 1
@@ -999,8 +1022,8 @@ class LiveSpliceHandler(BaseFrameHandler):
     # on_phase_start and set_drop_count defined earlier in class
 
     def close(self):
-        if self.h264_file:
-            self.h264_file.close()
+        if self.output_container:
+            self.output_container.close()
 
         if self.map_file:
             self.map_file.close()
@@ -1009,47 +1032,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.encoder1.close()
         self.encoder2.close()
 
-        elapsed = time.monotonic() - self.start_time if self.start_time else 0
-
-        # Duration based on input frames (VFR)
-        duration = self.frame_count / 25.0
-
-        # Create VFR MKV from raw H.264 + timestamps
-        self._create_vfr_mkv()
         self._print_summary()
-
-    def _create_vfr_mkv(self):
-        """Create VFR MKV by remuxing raw H.264 with VFR timestamps via PyAV."""
-        # Open raw H.264 for reading
-        input_container = av.open(str(self.h264_path))
-        input_stream = input_container.streams.video[0]
-
-        # Create output MKV
-        output_container = av.open(str(self.mkv_path), 'w')
-        output_stream = output_container.add_stream('h264')
-        output_stream.width = self.enc_width
-        output_stream.height = self.enc_height
-        output_stream.time_base = input_stream.time_base
-        if input_stream.codec_context.extradata:
-            output_stream.codec_context.extradata = input_stream.codec_context.extradata
-
-        # Remux with VFR timestamps
-        frame_idx = 0
-        frame_duration = int(input_stream.time_base.denominator / 25)  # 25fps source
-
-        for packet in input_container.demux(input_stream):
-            if frame_idx < len(self.frame_pts_list):
-                # Use timestamp from our list (input frame index)
-                input_frame_num = self.frame_pts_list[frame_idx]
-                pts = input_frame_num * frame_duration
-                packet.pts = pts
-                packet.dts = pts
-                packet.stream = output_stream
-                output_container.mux(packet)
-                frame_idx += 1
-
-        output_container.close()
-        input_container.close()
 
     def _print_summary(self):
         """Print summary after close."""
