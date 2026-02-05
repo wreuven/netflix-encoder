@@ -13,7 +13,6 @@ Two encoder contexts using NVENC for proper I/P frame production:
    - Output slices transplanted into stitched frames
 
 Stitched frames (programmatically generated):
-- For "unchanged": full P_Skip frame (refs prev)
 - For "video_only": P_Skip + transplanted region slices (refs prev)
 
 Usage:
@@ -23,7 +22,6 @@ Usage:
 
 import json
 import sys
-import tempfile
 import time
 from collections import Counter
 from fractions import Fraction
@@ -41,7 +39,7 @@ sys.path.insert(0, str(SPLICER_PATH))
 from frame_handler import BaseFrameHandler
 from h264_splicer import (
     parse_annexb, NALUnit, BitWriter, BitReader, SPS, PPS,
-    rewrite_slice_header, add_emulation_prevention, parse_slice_header,
+    rewrite_slice_header, parse_slice_header,
     modify_sps_num_ref_frames,
 )
 from nvenc_encoder import NVENCEncoder
@@ -270,12 +268,6 @@ class RegionEncoder:
     - Per-row slices for transplantation
     - No deblocking to prevent splice artifacts
     - Maintains encoder state for I/P frame production
-
-    For P-frames to work when transplanted, the padding pixels must match
-    what the decoder sees as the reference. We achieve this by:
-    1. Storing the padding pixels when we produce an IDR
-    2. Reusing those SAME padding pixels for subsequent P-frames
-    This ensures encoder2's reference matches its input for the padding area.
     """
 
     def __init__(self, output_dir):
@@ -290,20 +282,10 @@ class RegionEncoder:
         self._sps_pps_cache = {}
         self._last_region_size = None
 
-        # Store padding pixels from IDR frame for reuse in P-frames
-        # This ensures encoder2's reference padding matches input padding
-        self._cached_padding = None  # (top, bottom, left, right) strips
-        self._cached_padding_bounds = None  # (padded_x, padded_y, padded_w, padded_h, video_x, video_y, video_w, video_h)
-
-        # Debug: write raw encoder2 output to file
-        self._debug_file = open(output_dir / "encoder2_debug.h264", "wb")
-        self._debug_sps_written = False
-
     def _get_encoder(self, width, height):
         """Get or create encoder for given region size."""
         key = (width, height)
         if key not in self._encoders:
-            height_mbs = height // 16
             # Create new encoder with per-row slices
             self._encoders[key] = NVENCEncoder(
                 width, height,
@@ -343,12 +325,6 @@ class RegionEncoder:
         if padded_w < 32 or padded_h < 32:
             return None, None
 
-        # Video region within padded area (excluding padding)
-        video_x_in_padded = (region_x // 16) * 16 - padded_x
-        video_y_in_padded = (region_y // 16) * 16 - padded_y
-        video_w_in_padded = ((region_x + region_w + 15) // 16) * 16 - (region_x // 16) * 16
-        video_h_in_padded = ((region_y + region_h + 15) // 16) * 16 - (region_y // 16) * 16
-
         # Extract full padded region from current frame
         region_bgra = pixels[padded_y:padded_y+padded_h, padded_x:padded_x+padded_w].copy()
 
@@ -357,29 +333,6 @@ class RegionEncoder:
         size_changed = (current_size != self._last_region_size)
         no_sps_pps = (current_size not in self._sps_pps_cache)
         need_idr = force_idr or size_changed or no_sps_pps
-
-        # NOTE: Padding caching disabled for debugging position issue
-        # if need_idr:
-        #     # Store the padding pixels for reuse in subsequent P-frames
-        #     # This ensures encoder2's reference matches input for P-frames
-        #     self._cached_padding = region_bgra.copy()
-        #     self._cached_padding_bounds = (padded_x, padded_y, padded_w, padded_h,
-        #                                    video_x_in_padded, video_y_in_padded,
-        #                                    video_w_in_padded, video_h_in_padded)
-        # elif self._cached_padding is not None and self._cached_padding_bounds is not None:
-        #     # For P-frames: use cached padding, but update the video region with current content
-        #     cached_bounds = self._cached_padding_bounds
-        #     if (padded_x == cached_bounds[0] and padded_y == cached_bounds[1] and
-        #         padded_w == cached_bounds[2] and padded_h == cached_bounds[3]):
-        #         # Same bounds - reuse cached padding for border, update video region
-        #         vx, vy = cached_bounds[4], cached_bounds[5]
-        #         vw, vh = cached_bounds[6], cached_bounds[7]
-        #
-        #         # Start with cached frame (has correct padding)
-        #         region_bgra = self._cached_padding.copy()
-        #         # Update only the video region with current pixels
-        #         current_video = pixels[padded_y+vy:padded_y+vy+vh, padded_x+vx:padded_x+vx+vw]
-        #         region_bgra[vy:vy+vh, vx:vx+vw] = current_video
 
         # Convert to NV12
         nv12 = bgra_to_nv12(region_bgra)
@@ -391,9 +344,6 @@ class RegionEncoder:
 
         # Encode
         bitstream = encoder.encode(nv12, force_idr=need_idr)
-
-        # Debug: write raw encoder output to file
-        self._debug_file.write(bitstream)
 
         # Parse NAL units
         nals = parse_annexb(bitstream)
@@ -442,11 +392,6 @@ class RegionEncoder:
             encoder.close()
         self._encoders.clear()
         self._sps_pps_cache.clear()
-        self._cached_padding = None
-        self._cached_padding_bounds = None
-        if self._debug_file:
-            self._debug_file.close()
-            self._debug_file = None
 
 
 class StitchedFrameBuilder:
@@ -488,7 +433,7 @@ class StitchedFrameBuilder:
 
         return output_nals
 
-    def build_spliced_frame(self, region_slices, region_info, target_sps, debug=False):
+    def build_spliced_frame(self, region_slices, region_info, target_sps):
         """
         Build stitched frame with P_Skip + transplanted region slices.
 
@@ -513,12 +458,7 @@ class StitchedFrameBuilder:
             row = first_mb // region_mb_w
             region_rows[row] = nal
 
-        if debug:
-            print(f"[STITCH] region_slices={len(region_slices)}, region_rows={list(region_rows.keys())}")
-            print(f"[STITCH] region: mb_pos=({region_mb_x},{region_mb_y}) mb_size=({region_mb_w},{region_mb_h})")
-
         output_nals = []
-        transplanted_count = 0
 
         for row in range(self.height_mbs):
             first_mb = row * self.width_mbs
@@ -549,23 +489,11 @@ class StitchedFrameBuilder:
                         target_sps=target_sps
                     )
                     output_nals.append(rewritten)
-                    transplanted_count += 1
-
-                    if debug and row == region_mb_y:  # First transplanted row
-                        # Verify the rewritten slice
-                        reader = BitReader(rewritten.rbsp)
-                        out_first_mb = reader.read_ue()
-                        out_slice_type = reader.read_ue()
-                        print(f"[STITCH] First transplant: row={row} new_first_mb={new_first_mb} "
-                              f"out_first_mb={out_first_mb} out_type={rewritten.nal_unit_type} "
-                              f"slice_type={out_slice_type} orig_type={ov_nal.nal_unit_type}")
                 else:
                     # No slice for this row, use P_Skip
                     output_nals.append(create_pskip_slice(
                         first_mb + region_mb_x, region_mb_w, frame_num, self.sps, ref_ltr0=True
                     ))
-                    if debug:
-                        print(f"[STITCH] WARNING: Missing region slice for local_row={region_local_row}")
 
                 # Right P_Skip (after region)
                 right_start = region_mb_x + region_mb_w
@@ -578,9 +506,6 @@ class StitchedFrameBuilder:
                 output_nals.append(create_pskip_slice(
                     first_mb, self.width_mbs, frame_num, self.sps, ref_ltr0=True
                 ))
-
-        if debug:
-            print(f"[STITCH] output_nals={len(output_nals)}, transplanted={transplanted_count}")
 
         return output_nals
 
@@ -600,7 +525,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.height = height
         self.chrome_height = chrome_height
 
-        # Ensure even dimensions for x264
+        # Ensure even dimensions for NVENC
         self.enc_width = width if width % 2 == 0 else width + 1
         self.enc_height = height if height % 2 == 0 else height + 1
 
@@ -641,12 +566,6 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.output_stream = None
         self.total_bytes = 0
         self.extradata_set = False
-
-        # Map file for frame metadata
-        self.map_path = self.output_dir / "poc7_framemap.csv"
-        self.map_file = None
-        self.current_phase = "init"
-        self.drop_count = 0
 
         print(f"[poc7] Two-encoder architecture initialized")
         print(f"[poc7] Frame: {width}x{height}, Encoding: {self.enc_width}x{self.enc_height}")
@@ -718,44 +637,8 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         self._handle_unchanged(pixels)
 
-    def _write_map_entry(self, evt):
-        """Write frame metadata to map file."""
-        if self.map_file is None:
-            self.map_file = open(self.map_path, "w")
-            self.map_file.write("frame,category,rect_info,phase,drop_count,pixel_hash,enc_hash,out_hash\n")
-
-        # Get rect info
-        if evt.video_rect:
-            rect_info = f"{evt.video_rect[0]}:{evt.video_rect[1]}:{evt.video_rect[2]}:{evt.video_rect[3]}"
-        elif evt.damage_rects:
-            rects = [f"{r.x}:{r.y}:{r.width}:{r.height}" for r in evt.damage_rects]
-            rect_info = "|".join(rects)
-        else:
-            rect_info = "-"
-
-        # Get pixel hash (stored by on_frame)
-        pixel_hash = getattr(self, '_current_pixel_hash', '-')
-        # Get encoder output hash (stored by handlers)
-        enc_hash = getattr(self, '_current_enc_hash', '-')
-        # Get final output hash (stored by _write_nals)
-        out_hash = getattr(self, '_current_out_hash', '-')
-
-        self.map_file.write(f"{self.output_frame_count},{evt.category},{rect_info},{self.current_phase},{self.drop_count},{pixel_hash},{enc_hash},{out_hash}\n")
-
-    def on_phase_start(self, phase_name):
-        """Called when a new phase starts."""
-        print(f"[poc7] Phase: {phase_name}")
-        self.current_phase = phase_name
-        self.drop_count = 0
-
-    def set_drop_count(self, count):
-        """Set drop count for current phase."""
-        self.drop_count = count
-
-    def _write_nals(self, nals, include_sps_pps=False):
+    def _write_nals(self, nals):
         """Write NAL units directly to VFR MKV."""
-        import hashlib
-
         # Build frame data (Annex B format)
         frame_bytes = b''
         sps_data = None
@@ -802,12 +685,7 @@ class LiveSpliceHandler(BaseFrameHandler):
             pkt.is_keyframe = True
 
         self.output_container.mux(pkt)
-
-        self._current_out_hash = hashlib.md5(frame_bytes).hexdigest()[:8]
         self.output_frame_count += 1
-
-        if hasattr(self, '_current_evt') and self._current_evt:
-            self._write_map_entry(self._current_evt)
 
     def on_frame(self, evt, pixels, info):
         if self.start_time is None:
@@ -816,16 +694,6 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.frame_count += 1
         self.input_frame_index = self.frame_count - 1  # 0-indexed for PTS calculation
         self.category_counts[evt.category] += 1
-
-        # Store event for map file (written when output is produced)
-        self._current_evt = evt
-
-        # Compute pixel hash for map file
-        import hashlib
-        if pixels is not None:
-            self._current_pixel_hash = hashlib.md5(pixels.tobytes()).hexdigest()[:8]
-        else:
-            self._current_pixel_hash = '-'
 
         # Handle unchanged frames even without pixels (P_Skip doesn't need them)
         if evt.category == "unchanged":
@@ -862,9 +730,6 @@ class LiveSpliceHandler(BaseFrameHandler):
         If in video overlay mode: skip frame entirely (VFR output - extend previous frame duration)
         Otherwise: emit full P_Skip stitched frame.
         """
-        # P_Skip frames have no encoder output (generated programmatically)
-        self._current_enc_hash = 'pskip'
-
         # If in video overlay mode, skip this frame entirely (VFR)
         # The previous frame's duration will be extended when we mux to MP4
         if self.in_video_overlay_mode:
@@ -930,47 +795,16 @@ class LiveSpliceHandler(BaseFrameHandler):
             self._handle_unchanged(pixels)
             return
 
-        # Debug: hash the video region pixels to detect duplicates
-        import hashlib
-        region_pixels = pixels[vy:vy+vh, vx:vx+vw]
-        pixel_hash = hashlib.md5(region_pixels.tobytes()).hexdigest()[:8]
-
         # Encode region with Encoder Context 2
         # Force IDR if reference chain was broken by a "changed" frame
         slices, region_info = self.encoder2.encode_region(pixels, vx, vy, vw, vh,
                                                           force_idr=self.encoder2_needs_idr)
         self.encoder2_needs_idr = False  # Reset after encode
 
-        # Compute encoder output hash for map file
-        if slices:
-            enc_bytes = b''.join(s.to_bytes() for s in slices)
-            self._current_enc_hash = hashlib.md5(enc_bytes).hexdigest()[:8]
-        else:
-            self._current_enc_hash = '-'
-
         if slices and region_info:
-            # Debug: check if slices are I or P
-            i_slices = sum(1 for s in slices if s.nal_unit_type == 5)
-            p_slices = sum(1 for s in slices if s.nal_unit_type == 1)
-            if 400 <= self.frame_count <= 420:
-                slice_types = [s.nal_unit_type for s in slices[:3]]
-                print(f"[ENC2] frame={self.frame_count} slices: {len(slices)} total, {i_slices} IDR, {p_slices} non-IDR, first_types={slice_types}")
-
             # Build stitched frame with P_Skip + transplanted region
-            debug_frame = (self.frame_count in (400, 401, 402, 540, 541, 542))
-            nals = self.frame_builder.build_spliced_frame(slices, region_info, sps, debug=debug_frame)
+            nals = self.frame_builder.build_spliced_frame(slices, region_info, sps)
             if nals:
-                if debug_frame:
-                    # Verify output NALs - hash the transplanted slices
-                    transplant_bytes = b''
-                    for n in nals:
-                        reader = BitReader(n.rbsp)
-                        first_mb = reader.read_ue()
-                        slice_type = reader.read_ue()
-                        if slice_type in (2, 7):  # I-slice (transplanted)
-                            transplant_bytes += n.to_bytes()
-                    transplant_hash = hashlib.md5(transplant_bytes).hexdigest()[:8]
-                    print(f"[VERIFY] frame={self.frame_count} transplant_hash={transplant_hash} transplant_bytes={len(transplant_bytes)}")
                 self._write_nals(nals)
                 self.encoder1.notify_stitched_frame()
                 self.output_type_counts['stitched_region'] += 1
@@ -981,7 +815,6 @@ class LiveSpliceHandler(BaseFrameHandler):
 
     def _handle_changed(self, pixels):
         """Handle 'changed' frame: encode full frame with Encoder Context 1."""
-        import hashlib
         # After a "changed" frame, Encoder 2's reference is stale - force IDR on next use
         self.encoder2_needs_idr = True
 
@@ -997,15 +830,9 @@ class LiveSpliceHandler(BaseFrameHandler):
         nals = self.encoder1.encode(pixels, frame_num=frame_num)
 
         if nals:
-            # Check if this is an IDR
             has_idr = any(n.nal_unit_type == 5 for n in nals)
 
-            # Compute encoder output hash for map file
-            enc_bytes = b''.join(n.to_bytes() for n in nals if n.nal_unit_type in (1, 5))
-            self._current_enc_hash = hashlib.md5(enc_bytes).hexdigest()[:8]
-
-            # Write with SPS/PPS for IDR frames
-            self._write_nals(nals, include_sps_pps=has_idr)
+            self._write_nals(nals)
 
             # Update frame builder state
             sps, pps = self.encoder1.get_sps_pps()
@@ -1016,17 +843,10 @@ class LiveSpliceHandler(BaseFrameHandler):
                 self.output_type_counts['encoder1_idr'] += 1
             else:
                 self.output_type_counts['encoder1_p'] += 1
-        else:
-            self._current_enc_hash = '-'
-
-    # on_phase_start and set_drop_count defined earlier in class
 
     def close(self):
         if self.output_container:
             self.output_container.close()
-
-        if self.map_file:
-            self.map_file.close()
 
         # Close encoders
         self.encoder1.close()
