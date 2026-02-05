@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-POC 7: Live Integration with Two-Encoder Architecture
+Netflix Encoder:Live Integration with Two-Encoder Architecture
 
 Two encoder contexts using NVENC for proper I/P frame production:
 1. Full-Frame Encoder (Context 1): For "changed" frames
@@ -17,7 +17,7 @@ Stitched frames (programmatically generated):
 
 Usage:
     python3 ../chrome_gpu_tracer/test_frame_classifier.py \
-        --handler poc7_live_splice_handler.py
+        --handler netflix_encoder.py
 """
 
 import json
@@ -512,7 +512,7 @@ class StitchedFrameBuilder:
 
 class LiveSpliceHandler(BaseFrameHandler):
     """
-    POC 7: Live encoder using two-encoder architecture.
+    Netflix Encoder:Live encoder using two-encoder architecture.
 
     Routes frames to appropriate encoder based on category:
     - "changed" -> Encoder Context 1 (full-frame)
@@ -535,7 +535,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.output_dir = Path(__file__).parent / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.metrics_path = self.output_dir / "poc7_metrics.json"
+        self.metrics_path = self.output_dir / "metrics.json"
 
         # Initialize encoder contexts
         self.encoder1 = FullFrameEncoder(self.enc_width, self.enc_height, self.output_dir)
@@ -567,10 +567,10 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.total_bytes = 0
         self.extradata_set = False
 
-        print(f"[poc7] Two-encoder architecture initialized")
-        print(f"[poc7] Frame: {width}x{height}, Encoding: {self.enc_width}x{self.enc_height}")
-        print(f"[poc7] MBs: {self.width_mbs}x{self.height_mbs}")
-        print(f"[poc7] Chrome height: {chrome_height}")
+        print(f"[enc] Two-encoder architecture initialized")
+        print(f"[enc] Frame: {width}x{height}, Encoding: {self.enc_width}x{self.enc_height}")
+        print(f"[enc] MBs: {self.width_mbs}x{self.height_mbs}")
+        print(f"[enc] Chrome height: {chrome_height}")
 
     def _pad_pixels(self, pixels):
         """Pad pixels to encoding dimensions if needed."""
@@ -720,7 +720,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         if self.frame_count % 100 == 0:
             elapsed = time.monotonic() - self.start_time
             fps = self.frame_count / elapsed if elapsed > 0 else 0
-            print(f"[poc7] Frame {self.frame_count} ({fps:.1f} fps) - "
+            print(f"[enc] Frame {self.frame_count} ({fps:.1f} fps) - "
                   f"enc1: {self.encoder1.encode_count}, enc2: {self.encoder2.encode_count}, "
                   f"stitched: {self.output_type_counts['stitched_pskip'] + self.output_type_counts['stitched_region']}")
 
@@ -763,7 +763,7 @@ class LiveSpliceHandler(BaseFrameHandler):
         """Handle 'video_only' frame: encode region + build stitched frame."""
         # Enter video overlay mode - unchanged frames will now be skipped (VFR)
         if not self.in_video_overlay_mode:
-            print(f"[poc7] Entering video overlay mode at frame {self.frame_count}")
+            print(f"[enc] Entering video overlay mode at frame {self.frame_count}")
             self.in_video_overlay_mode = True
 
         sps, pps = self.encoder1.get_sps_pps()
@@ -820,7 +820,7 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         # Exit video overlay mode when UI changes
         if self.in_video_overlay_mode:
-            print(f"[poc7] Exiting video overlay mode at frame {self.frame_count}")
+            print(f"[enc] Exiting video overlay mode at frame {self.frame_count}")
             self.in_video_overlay_mode = False
 
         # Get frame_num from frame_builder (increment first to get next frame_num)
@@ -887,7 +887,7 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         print()
         print("=" * 70)
-        print("POC 7: Two-Encoder Architecture Summary (NVENC)")
+        print("Netflix Encoder:Two-Encoder Architecture Summary (NVENC)")
         print("=" * 70)
         print(f"  Input frames:    {self.frame_count}")
         print(f"  Output frames:   {self.output_frame_count}")
