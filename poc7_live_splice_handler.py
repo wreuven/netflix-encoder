@@ -22,13 +22,13 @@ Usage:
 """
 
 import json
-import subprocess
 import sys
 import tempfile
 import time
 from collections import Counter
 from pathlib import Path
 
+import av
 import numpy as np
 
 # Add paths
@@ -609,7 +609,6 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.output_dir = Path(__file__).parent / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.h264_path = self.output_dir / "live_spliced.h264"
         self.metrics_path = self.output_dir / "poc7_metrics.json"
 
         # Initialize encoder contexts
@@ -630,8 +629,16 @@ class LiveSpliceHandler(BaseFrameHandler):
         # Track last video_rect for detecting "changed" frames that are actually video-only
         self.last_video_rect = None
 
-        # Output file
-        self.output_file = None
+        # VFR support: track whether we're in video overlay mode
+        # Once we start video overlay, unchanged frames are skipped (VFR output)
+        self.in_video_overlay_mode = False
+        self.input_frame_index = 0  # Tracks input frame position for timestamp calculation
+        self.frame_pts_list = []  # PTS for each output frame
+
+        # Output: raw H.264 (for debugging) + VFR MKV via mkvmerge at close
+        self.h264_path = self.output_dir / "live_spliced.h264"
+        self.mkv_path = self.output_dir / "live_spliced.mkv"
+        self.h264_file = None
         self.total_bytes = 0
         self.sps_pps_written = False
 
@@ -746,36 +753,36 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.drop_count = count
 
     def _write_nals(self, nals, include_sps_pps=False):
-        """Write NAL units to output file."""
+        """Write NAL units to raw H.264 file, track timestamps for VFR MKV."""
         import hashlib
-        if self.output_file is None:
-            self.output_file = open(self.h264_path, "wb")
+
+        if self.h264_file is None:
+            self.h264_file = open(self.h264_path, "wb")
 
         frame_bytes = b''
         for nal in nals:
-            # Skip SPS/PPS from encoder output if we've already written them
-            # (except when explicitly including them after IDR)
+            # Skip duplicate SPS/PPS
             if not include_sps_pps and nal.nal_unit_type in (7, 8) and self.sps_pps_written:
                 continue
 
-            # Modify SPS to allow 2 reference frames (needed for LTR 0 + short-term)
+            # Modify SPS to allow 2 reference frames
             if nal.nal_unit_type == 7:
                 nal = modify_sps_num_ref_frames(nal, 2)
 
             data = b'\x00\x00\x00\x01' + nal.to_bytes()
-            self.output_file.write(data)
+            self.h264_file.write(data)
             self.total_bytes += len(data)
             frame_bytes += data
 
             if nal.nal_unit_type in (7, 8):
                 self.sps_pps_written = True
 
-        # Hash of all bytes written for this frame
-        self._current_out_hash = hashlib.md5(frame_bytes).hexdigest()[:8]
+        # Track PTS for VFR (input frame index)
+        self.frame_pts_list.append(self.input_frame_index)
 
+        self._current_out_hash = hashlib.md5(frame_bytes).hexdigest()[:8]
         self.output_frame_count += 1
 
-        # Write map entry for this output frame
         if hasattr(self, '_current_evt') and self._current_evt:
             self._write_map_entry(self._current_evt)
 
@@ -784,6 +791,7 @@ class LiveSpliceHandler(BaseFrameHandler):
             self.start_time = time.monotonic()
 
         self.frame_count += 1
+        self.input_frame_index = self.frame_count - 1  # 0-indexed for PTS calculation
         self.category_counts[evt.category] += 1
 
         # Store event for map file (written when output is produced)
@@ -826,12 +834,21 @@ class LiveSpliceHandler(BaseFrameHandler):
                   f"stitched: {self.output_type_counts['stitched_pskip'] + self.output_type_counts['stitched_region']}")
 
     def _handle_unchanged(self, pixels):
-        """Handle 'unchanged' frame: emit full P_Skip stitched frame.
+        """Handle 'unchanged' frame.
 
-        P_Skip frames don't need pixel data - they just copy from reference.
+        If in video overlay mode: skip frame entirely (VFR output - extend previous frame duration)
+        Otherwise: emit full P_Skip stitched frame.
         """
         # P_Skip frames have no encoder output (generated programmatically)
         self._current_enc_hash = 'pskip'
+
+        # If in video overlay mode, skip this frame entirely (VFR)
+        # The previous frame's duration will be extended when we mux to MP4
+        if self.in_video_overlay_mode:
+            # Don't output anything - this creates VFR by extending previous frame
+            # Don't break encoder2's reference chain since we're not outputting
+            self.output_type_counts['vfr_skipped'] += 1
+            return
 
         # After an unchanged frame, encoder2's reference chain is broken
         # (decoder will use this P_Skip frame as reference, not encoder2's last output)
@@ -856,6 +873,11 @@ class LiveSpliceHandler(BaseFrameHandler):
 
     def _handle_video_only(self, evt, pixels):
         """Handle 'video_only' frame: encode region + build stitched frame."""
+        # Enter video overlay mode - unchanged frames will now be skipped (VFR)
+        if not self.in_video_overlay_mode:
+            print(f"[poc7] Entering video overlay mode at frame {self.frame_count}")
+            self.in_video_overlay_mode = True
+
         sps, pps = self.encoder1.get_sps_pps()
 
         if sps is None:
@@ -940,6 +962,11 @@ class LiveSpliceHandler(BaseFrameHandler):
         # After a "changed" frame, Encoder 2's reference is stale - force IDR on next use
         self.encoder2_needs_idr = True
 
+        # Exit video overlay mode when UI changes
+        if self.in_video_overlay_mode:
+            print(f"[poc7] Exiting video overlay mode at frame {self.frame_count}")
+            self.in_video_overlay_mode = False
+
         # Get frame_num from frame_builder (increment first to get next frame_num)
         self.frame_builder.increment_frame_num()
         frame_num = self.frame_builder.frame_num
@@ -972,8 +999,8 @@ class LiveSpliceHandler(BaseFrameHandler):
     # on_phase_start and set_drop_count defined earlier in class
 
     def close(self):
-        if self.output_file:
-            self.output_file.close()
+        if self.h264_file:
+            self.h264_file.close()
 
         if self.map_file:
             self.map_file.close()
@@ -983,18 +1010,51 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.encoder2.close()
 
         elapsed = time.monotonic() - self.start_time if self.start_time else 0
-        duration = self.output_frame_count / 25.0
 
-        # Convert to MP4 with correct framerate (25fps)
-        mp4_path = self.h264_path.with_suffix(".mp4")
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-r", "25",  # Force 25fps output
-            "-i", str(self.h264_path),
-            "-c:v", "copy",
-            "-video_track_timescale", "25",
-            str(mp4_path)
-        ], capture_output=True)
+        # Duration based on input frames (VFR)
+        duration = self.frame_count / 25.0
+
+        # Create VFR MKV from raw H.264 + timestamps
+        self._create_vfr_mkv()
+        self._print_summary()
+
+    def _create_vfr_mkv(self):
+        """Create VFR MKV by remuxing raw H.264 with VFR timestamps via PyAV."""
+        # Open raw H.264 for reading
+        input_container = av.open(str(self.h264_path))
+        input_stream = input_container.streams.video[0]
+
+        # Create output MKV
+        output_container = av.open(str(self.mkv_path), 'w')
+        output_stream = output_container.add_stream('h264')
+        output_stream.width = self.enc_width
+        output_stream.height = self.enc_height
+        output_stream.time_base = input_stream.time_base
+        if input_stream.codec_context.extradata:
+            output_stream.codec_context.extradata = input_stream.codec_context.extradata
+
+        # Remux with VFR timestamps
+        frame_idx = 0
+        frame_duration = int(input_stream.time_base.denominator / 25)  # 25fps source
+
+        for packet in input_container.demux(input_stream):
+            if frame_idx < len(self.frame_pts_list):
+                # Use timestamp from our list (input frame index)
+                input_frame_num = self.frame_pts_list[frame_idx]
+                pts = input_frame_num * frame_duration
+                packet.pts = pts
+                packet.dts = pts
+                packet.stream = output_stream
+                output_container.mux(packet)
+                frame_idx += 1
+
+        output_container.close()
+        input_container.close()
+
+    def _print_summary(self):
+        """Print summary after close."""
+        duration = self.frame_count / 25.0
+        elapsed = time.monotonic() - self.start_time if self.start_time else 0
 
         # Calculate metrics
         bitrate = (self.total_bytes * 8 / 1_000_000) / duration if duration > 0 else 0
@@ -1054,15 +1114,17 @@ class LiveSpliceHandler(BaseFrameHandler):
         print(f"    P frames:       {self.encoder2.p_count}")
         print()
         stitched = self.output_type_counts.get('stitched_pskip', 0) + self.output_type_counts.get('stitched_region', 0)
+        vfr_skipped = self.output_type_counts.get('vfr_skipped', 0)
         print(f"  Stitched frames:  {stitched}")
+        print(f"  VFR skipped:      {vfr_skipped} (unchanged during video overlay)")
+        print(f"  VFR mode:         {'YES' if vfr_skipped > 0 else 'NO'}")
         print()
-        print(f"  Output: {self.h264_path}")
-        print(f"  MP4:    {mp4_path}")
+        print(f"  Output: {self.mkv_path}")
         print(f"  Metrics: {self.metrics_path}")
         print()
         print("Playback:")
-        print(f"  ffplay {mp4_path}")
-        print(f"  python3 /home/wachtfogel/h264-newpoc/splicer/staging_player.py {mp4_path}")
+        print(f"  ffplay {self.mkv_path}")
+        print(f"  python3 /home/wachtfogel/h264-newpoc/splicer/staging_player.py {self.mkv_path}")
 
 
 def create_handler(fw, fh, chrome_height):
