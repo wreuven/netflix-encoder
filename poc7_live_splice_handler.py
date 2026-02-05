@@ -140,11 +140,12 @@ class FullFrameEncoder:
         """Called when a stitched frame is output instead of encoder output."""
         self.stitched_frames_since_last_encode += 1
 
-    def _rewrite_slice_for_ltr0(self, nal, ref_ltr0=False):
+    def _rewrite_slice_for_ltr0(self, nal, ref_ltr0=False, frame_num=None):
         """
         Rewrite slice header to:
         1. Mark this frame as LTR 0 (always)
         2. Reference LTR 0 instead of short-term ref (if ref_ltr0=True)
+        3. Use correct frame_num (accounting for stitched frames)
         """
         is_idr = nal.nal_unit_type == 5
 
@@ -172,19 +173,23 @@ class FullFrameEncoder:
             nal, self.sps, self.pps,
             new_first_mb=header.first_mb_in_slice,
             new_idc=header.disable_deblocking_filter_idc,
-            new_frame_num=None,  # Keep original
+            new_frame_num=frame_num,  # Use provided frame_num
             new_ref_pic_list_mod=ref_mod,
             new_dec_ref_pic_marking=marking,
         )
 
         return rewritten
 
-    def encode(self, pixels):
+    def encode(self, pixels, frame_num=None):
         """
         Encode full frame with LTR 0 post-processing.
 
         - Always marks output as LTR 0
         - When resuming after stitched frames: references LTR 0 (efficient P-frame)
+
+        Args:
+            pixels: BGRA pixel data
+            frame_num: Frame number to use in bitstream (from frame_builder)
         Returns: list of NAL units
         """
         # Only force IDR for the very first frame
@@ -212,7 +217,8 @@ class FullFrameEncoder:
                 output_nals.append(nal)
             elif nal.nal_unit_type in (1, 5):
                 # Rewrite slice to mark as LTR 0 (and ref LTR 0 if needed)
-                rewritten = self._rewrite_slice_for_ltr0(nal, ref_ltr0=need_ltr_ref)
+                # Use provided frame_num to stay in sync with stitched frames
+                rewritten = self._rewrite_slice_for_ltr0(nal, ref_ltr0=need_ltr_ref, frame_num=frame_num)
                 output_nals.append(rewritten)
             else:
                 output_nals.append(nal)
@@ -220,10 +226,8 @@ class FullFrameEncoder:
         # Track frame types
         has_idr = any(n.nal_unit_type == 5 for n in output_nals)
         if has_idr:
-            self.frame_num = 0
             self.idr_count += 1
         else:
-            self.frame_num = (self.frame_num + 1) % (1 << (self.sps.log2_max_frame_num_minus4 + 4))
             self.p_count += 1
             if need_ltr_ref:
                 self.ltr_ref_count += 1
@@ -281,7 +285,7 @@ class RegionEncoder:
             )
         return self._encoders[key]
 
-    def encode_region(self, pixels, region_x, region_y, region_w, region_h):
+    def encode_region(self, pixels, region_x, region_y, region_w, region_h, force_idr=False):
         """
         Encode a region with 1 MB background padding.
 
@@ -313,14 +317,15 @@ class RegionEncoder:
 
         # Check if region size changed (need IDR for new size)
         current_size = (padded_w, padded_h)
-        force_idr = (current_size not in self._sps_pps_cache)
+        # TEMPORARY: Always force IDR for debugging
+        need_idr = True
         self._last_region_size = current_size
 
         # Get encoder for this size
         encoder = self._get_encoder(padded_w, padded_h)
 
         # Encode
-        bitstream = encoder.encode(nv12, force_idr=force_idr)
+        bitstream = encoder.encode(nv12, force_idr=need_idr)
 
         # Parse NAL units
         nals = parse_annexb(bitstream)
@@ -410,7 +415,7 @@ class StitchedFrameBuilder:
 
         return output_nals
 
-    def build_spliced_frame(self, region_slices, region_info, target_sps):
+    def build_spliced_frame(self, region_slices, region_info, target_sps, debug=False):
         """
         Build stitched frame with P_Skip + transplanted region slices.
 
@@ -435,7 +440,12 @@ class StitchedFrameBuilder:
             row = first_mb // region_mb_w
             region_rows[row] = nal
 
+        if debug:
+            print(f"[STITCH] region_slices={len(region_slices)}, region_rows={list(region_rows.keys())}")
+            print(f"[STITCH] region: mb_pos=({region_mb_x},{region_mb_y}) mb_size=({region_mb_w},{region_mb_h})")
+
         output_nals = []
+        transplanted_count = 0
 
         for row in range(self.height_mbs):
             first_mb = row * self.width_mbs
@@ -466,11 +476,23 @@ class StitchedFrameBuilder:
                         target_sps=target_sps
                     )
                     output_nals.append(rewritten)
+                    transplanted_count += 1
+
+                    if debug and row == region_mb_y:  # First transplanted row
+                        # Verify the rewritten slice
+                        reader = BitReader(rewritten.rbsp)
+                        out_first_mb = reader.read_ue()
+                        out_slice_type = reader.read_ue()
+                        print(f"[STITCH] First transplant: row={row} new_first_mb={new_first_mb} "
+                              f"out_first_mb={out_first_mb} out_type={rewritten.nal_unit_type} "
+                              f"slice_type={out_slice_type} orig_type={ov_nal.nal_unit_type}")
                 else:
                     # No slice for this row, use P_Skip
                     output_nals.append(create_pskip_slice(
                         first_mb + region_mb_x, region_mb_w, frame_num, self.sps
                     ))
+                    if debug:
+                        print(f"[STITCH] WARNING: Missing region slice for local_row={region_local_row}")
 
                 # Right P_Skip (after region)
                 right_start = region_mb_x + region_mb_w
@@ -483,6 +505,9 @@ class StitchedFrameBuilder:
                 output_nals.append(create_pskip_slice(
                     first_mb, self.width_mbs, frame_num, self.sps
                 ))
+
+        if debug:
+            print(f"[STITCH] output_nals={len(output_nals)}, transplanted={transplanted_count}")
 
         return output_nals
 
@@ -527,10 +552,22 @@ class LiveSpliceHandler(BaseFrameHandler):
         self.category_counts = Counter()
         self.output_type_counts = Counter()
 
+        # Track when Encoder 2 needs IDR (after a "changed" frame breaks its reference chain)
+        self.encoder2_needs_idr = True  # Start with IDR
+
+        # Track last video_rect for detecting "changed" frames that are actually video-only
+        self.last_video_rect = None
+
         # Output file
         self.output_file = None
         self.total_bytes = 0
         self.sps_pps_written = False
+
+        # Map file for frame metadata
+        self.map_path = self.output_dir / "poc7_framemap.csv"
+        self.map_file = None
+        self.current_phase = "init"
+        self.drop_count = 0
 
         print(f"[poc7] Two-encoder architecture initialized")
         print(f"[poc7] Frame: {width}x{height}, Encoding: {self.enc_width}x{self.enc_height}")
@@ -545,11 +582,104 @@ class LiveSpliceHandler(BaseFrameHandler):
             return padded
         return pixels
 
+    def _is_damage_same_as_video(self, evt, tolerance=8):
+        """Check if damage_rect matches last_video_rect (within tolerance)."""
+        if not evt.damage_rects or not self.last_video_rect:
+            return False
+        if len(evt.damage_rects) != 1:
+            return False  # Multiple damage rects = not just video
+
+        dr = evt.damage_rects[0]
+        vx, vy, vw, vh = self.last_video_rect
+
+        # Adjust video_rect for chrome height (video_rect is CSS coords)
+        vy_adjusted = vy + self.chrome_height
+
+        # Check if damage_rect approximately matches video_rect
+        if (abs(dr.x - vx) <= tolerance and
+            abs(dr.y - vy_adjusted) <= tolerance and
+            abs(dr.width - vw) <= tolerance and
+            abs(dr.height - vh) <= tolerance):
+            return True
+        return False
+
+    def _handle_video_only_from_damage(self, evt, pixels):
+        """Handle a 'changed' frame that's actually video-only (damage matches video_rect)."""
+        # Use last_video_rect since evt doesn't have video_rect for "changed" category
+        sps, pps = self.encoder1.get_sps_pps()
+        if sps is None:
+            self._handle_changed(pixels)
+            return
+
+        vx, vy, vw, vh = self.last_video_rect
+        vy = vy + self.chrome_height
+
+        # Clamp to frame bounds
+        vx = max(0, min(vx, self.enc_width - 1))
+        vy = max(0, min(vy, self.enc_height - 1))
+        vw = min(vw, self.enc_width - vx)
+        vh = min(vh, self.enc_height - vy)
+
+        if vw < 32 or vh < 32:
+            self._handle_unchanged(pixels)
+            return
+
+        # Encode region with Encoder 2 (same as video_only)
+        slices, region_info = self.encoder2.encode_region(pixels, vx, vy, vw, vh,
+                                                          force_idr=self.encoder2_needs_idr)
+        self.encoder2_needs_idr = False
+
+        if slices and region_info:
+            nals = self.frame_builder.build_spliced_frame(slices, region_info, sps)
+            if nals:
+                self._write_nals(nals)
+                self.encoder1.notify_stitched_frame()
+                self.output_type_counts['stitched_region'] += 1
+                return
+
+        self._handle_unchanged(pixels)
+
+    def _write_map_entry(self, evt):
+        """Write frame metadata to map file."""
+        if self.map_file is None:
+            self.map_file = open(self.map_path, "w")
+            self.map_file.write("frame,category,rect_info,phase,drop_count,pixel_hash,enc_hash,out_hash\n")
+
+        # Get rect info
+        if evt.video_rect:
+            rect_info = f"{evt.video_rect[0]}:{evt.video_rect[1]}:{evt.video_rect[2]}:{evt.video_rect[3]}"
+        elif evt.damage_rects:
+            rects = [f"{r.x}:{r.y}:{r.width}:{r.height}" for r in evt.damage_rects]
+            rect_info = "|".join(rects)
+        else:
+            rect_info = "-"
+
+        # Get pixel hash (stored by on_frame)
+        pixel_hash = getattr(self, '_current_pixel_hash', '-')
+        # Get encoder output hash (stored by handlers)
+        enc_hash = getattr(self, '_current_enc_hash', '-')
+        # Get final output hash (stored by _write_nals)
+        out_hash = getattr(self, '_current_out_hash', '-')
+
+        self.map_file.write(f"{self.output_frame_count},{evt.category},{rect_info},{self.current_phase},{self.drop_count},{pixel_hash},{enc_hash},{out_hash}\n")
+
+    def on_phase_start(self, phase_name):
+        """Called when a new phase starts."""
+        print(f"[poc7] Phase: {phase_name}")
+        self.current_phase = phase_name
+        self.drop_count = 0
+
+    def set_drop_count(self, count):
+        """Set drop count for current phase."""
+        self.drop_count = count
+
     def _write_nals(self, nals, include_sps_pps=False):
         """Write NAL units to output file."""
+        import hashlib
         if self.output_file is None:
             self.output_file = open(self.h264_path, "wb")
 
+        frame_bytes = b''
         for nal in nals:
             # Skip SPS/PPS from encoder output if we've already written them
             # (except when explicitly including them after IDR)
@@ -559,11 +689,19 @@ class LiveSpliceHandler(BaseFrameHandler):
             data = b'\x00\x00\x00\x01' + nal.to_bytes()
             self.output_file.write(data)
             self.total_bytes += len(data)
+            frame_bytes += data
 
             if nal.nal_unit_type in (7, 8):
                 self.sps_pps_written = True
 
+        # Hash of all bytes written for this frame
+        self._current_out_hash = hashlib.md5(frame_bytes).hexdigest()[:8]
+
         self.output_frame_count += 1
+
+        # Write map entry for this output frame
+        if hasattr(self, '_current_evt') and self._current_evt:
+            self._write_map_entry(self._current_evt)
 
     def on_frame(self, evt, pixels, info):
         if self.start_time is None:
@@ -571,6 +709,16 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         self.frame_count += 1
         self.category_counts[evt.category] += 1
+
+        # Store event for map file (written when output is produced)
+        self._current_evt = evt
+
+        # Compute pixel hash for map file
+        import hashlib
+        if pixels is not None:
+            self._current_pixel_hash = hashlib.md5(pixels.tobytes()).hexdigest()[:8]
+        else:
+            self._current_pixel_hash = '-'
 
         # Handle unchanged frames even without pixels (P_Skip doesn't need them)
         if evt.category == "unchanged":
@@ -585,8 +733,12 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         # Route based on category
         if evt.category == "video_only":
+            self.last_video_rect = evt.video_rect
             self._handle_video_only(evt, pixels)
-        else:  # "changed"
+        elif evt.category == "changed" and self._is_damage_same_as_video(evt):
+            # "changed" but damage matches video_rect - treat as video_only
+            self._handle_video_only_from_damage(evt, pixels)
+        else:  # truly "changed"
             self._handle_changed(pixels)
 
         # Status every 100 frames
@@ -602,6 +754,9 @@ class LiveSpliceHandler(BaseFrameHandler):
 
         P_Skip frames don't need pixel data - they just copy from reference.
         """
+        # P_Skip frames have no encoder output (generated programmatically)
+        self._current_enc_hash = 'pskip'
+
         sps, pps = self.encoder1.get_sps_pps()
 
         if sps is None:
@@ -650,13 +805,40 @@ class LiveSpliceHandler(BaseFrameHandler):
             self._handle_unchanged(pixels)
             return
 
+        # Debug: hash the video region pixels to detect duplicates
+        import hashlib
+        region_pixels = pixels[vy:vy+vh, vx:vx+vw]
+        pixel_hash = hashlib.md5(region_pixels.tobytes()).hexdigest()[:8]
+
         # Encode region with Encoder Context 2
-        slices, region_info = self.encoder2.encode_region(pixels, vx, vy, vw, vh)
+        # Force IDR if reference chain was broken by a "changed" frame
+        slices, region_info = self.encoder2.encode_region(pixels, vx, vy, vw, vh,
+                                                          force_idr=self.encoder2_needs_idr)
+        self.encoder2_needs_idr = False  # Reset after encode
+
+        # Compute encoder output hash for map file
+        if slices:
+            enc_bytes = b''.join(s.to_bytes() for s in slices)
+            self._current_enc_hash = hashlib.md5(enc_bytes).hexdigest()[:8]
+        else:
+            self._current_enc_hash = '-'
 
         if slices and region_info:
             # Build stitched frame with P_Skip + transplanted region
-            nals = self.frame_builder.build_spliced_frame(slices, region_info, sps)
+            debug_frame = (self.frame_count in (400, 401, 402, 540, 541, 542))
+            nals = self.frame_builder.build_spliced_frame(slices, region_info, sps, debug=debug_frame)
             if nals:
+                if debug_frame:
+                    # Verify output NALs - hash the transplanted slices
+                    transplant_bytes = b''
+                    for n in nals:
+                        reader = BitReader(n.rbsp)
+                        first_mb = reader.read_ue()
+                        slice_type = reader.read_ue()
+                        if slice_type in (2, 7):  # I-slice (transplanted)
+                            transplant_bytes += n.to_bytes()
+                    transplant_hash = hashlib.md5(transplant_bytes).hexdigest()[:8]
+                    print(f"[VERIFY] frame={self.frame_count} transplant_hash={transplant_hash} transplant_bytes={len(transplant_bytes)}")
                 self._write_nals(nals)
                 self.encoder1.notify_stitched_frame()
                 self.output_type_counts['stitched_region'] += 1
@@ -667,11 +849,23 @@ class LiveSpliceHandler(BaseFrameHandler):
 
     def _handle_changed(self, pixels):
         """Handle 'changed' frame: encode full frame with Encoder Context 1."""
-        nals = self.encoder1.encode(pixels)
+        import hashlib
+        # After a "changed" frame, Encoder 2's reference is stale - force IDR on next use
+        self.encoder2_needs_idr = True
+
+        # Get frame_num from frame_builder (increment first to get next frame_num)
+        self.frame_builder.increment_frame_num()
+        frame_num = self.frame_builder.frame_num
+
+        nals = self.encoder1.encode(pixels, frame_num=frame_num)
 
         if nals:
             # Check if this is an IDR
             has_idr = any(n.nal_unit_type == 5 for n in nals)
+
+            # Compute encoder output hash for map file
+            enc_bytes = b''.join(n.to_bytes() for n in nals if n.nal_unit_type in (1, 5))
+            self._current_enc_hash = hashlib.md5(enc_bytes).hexdigest()[:8]
 
             # Write with SPS/PPS for IDR frames
             self._write_nals(nals, include_sps_pps=has_idr)
@@ -684,19 +878,18 @@ class LiveSpliceHandler(BaseFrameHandler):
                 self.frame_builder.reset_frame_num()
                 self.output_type_counts['encoder1_idr'] += 1
             else:
-                # Increment frame_num for P-frames from encoder1
-                self.frame_builder.increment_frame_num()
                 self.output_type_counts['encoder1_p'] += 1
+        else:
+            self._current_enc_hash = '-'
 
-    def on_phase_start(self, name):
-        print(f"[poc7] Phase: {name}")
-
-    def set_drop_count(self, count):
-        pass
+    # on_phase_start and set_drop_count defined earlier in class
 
     def close(self):
         if self.output_file:
             self.output_file.close()
+
+        if self.map_file:
+            self.map_file.close()
 
         # Close encoders
         self.encoder1.close()
