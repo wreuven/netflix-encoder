@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="encoder1Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4a90d9"/>
+      <stop offset="100%" style="stop-color:#357abd"/>
+    </linearGradient>
+    <linearGradient id="encoder2Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#50c878"/>
+      <stop offset="100%" style="stop-color:#3da35d"/>
+    </linearGradient>
+    <linearGradient id="stitchedGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f4a261"/>
+      <stop offset="100%" style="stop-color:#e76f51"/>
+    </linearGradient>
+
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#888"/>
+    </marker>
+    <marker id="arrowheadBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4a90d9"/>
+    </marker>
+    <marker id="arrowheadOrange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f4a261"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="url(#bgGrad)"/>
+
+  <!-- Title -->
+  <text x="960" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="46" font-weight="bold" fill="#fff">
+    Netflix UI Encoder: Two-Context Stream Architecture
+  </text>
+  <text x="960" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" fill="#aaa">
+    H.264 Baseline with LTR 0 Chain and Slice Splicing
+  </text>
+
+  <!-- Input Section -->
+  <rect x="60" y="150" width="200" height="100" rx="10" fill="#2d3748" stroke="#4a5568" stroke-width="2"/>
+  <text x="160" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="bold" fill="#fff">Frame Classifier</text>
+  <text x="160" y="215" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#aaa">chrome_gpu_tracer</text>
+  <text x="160" y="235" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#888">category + pixels</text>
+
+  <!-- Router -->
+  <polygon points="360,200 440,150 440,250" fill="#2d3748" stroke="#4a5568" stroke-width="2"/>
+  <text x="400" y="205" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#fff">Route</text>
+
+  <!-- Arrow from classifier to router -->
+  <line x1="260" y1="200" x2="355" y2="200" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Three paths from router -->
+  <!-- Changed path -->
+  <path d="M 440 170 L 500 170 L 500 320" stroke="#4a90d9" stroke-width="3" fill="none" marker-end="url(#arrowheadBlue)"/>
+  <text x="450" y="155" font-family="Arial, sans-serif" font-size="17" fill="#4a90d9">"changed"</text>
+
+  <!-- Video_only path -->
+  <path d="M 440 200 L 580 200 L 580 520" stroke="#50c878" stroke-width="3" fill="none"/>
+  <text x="470" y="190" font-family="Arial, sans-serif" font-size="17" fill="#50c878">"video_only" (preview overlay)</text>
+
+  <!-- Unchanged path -->
+  <path d="M 440 230 L 660 230 L 660 720" stroke="#f4a261" stroke-width="3" fill="none" marker-end="url(#arrowheadOrange)"/>
+  <text x="470" y="222" font-family="Arial, sans-serif" font-size="17" fill="#f4a261">"unchanged"</text>
+
+  <!-- Encoder 1 Box -->
+  <rect x="400" y="330" width="280" height="160" rx="10" fill="url(#encoder1Grad)" stroke="#357abd" stroke-width="2"/>
+  <text x="540" y="365" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="bold" fill="#fff">Encoder Context 1</text>
+  <text x="540" y="390" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#cce5ff">Full-Frame NVENC</text>
+  <line x1="420" y1="405" x2="660" y2="405" stroke="#ffffff40" stroke-width="1"/>
+  <text x="430" y="430" font-family="Arial, sans-serif" font-size="16" fill="#fff">• Baseline profile, ref=1</text>
+  <text x="430" y="450" font-family="Arial, sans-serif" font-size="16" fill="#fff">• Every frame → LTR 0</text>
+  <text x="430" y="470" font-family="Arial, sans-serif" font-size="16" fill="#fff">• P-frames ref previous LTR 0</text>
+
+  <!-- Encoder 2 Box -->
+  <rect x="480" y="530" width="280" height="140" rx="10" fill="url(#encoder2Grad)" stroke="#3da35d" stroke-width="2"/>
+  <text x="620" y="565" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="bold" fill="#fff">Encoder Context 2</text>
+  <text x="620" y="590" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#c8f7d8">Region NVENC</text>
+  <line x1="500" y1="605" x2="740" y2="605" stroke="#ffffff40" stroke-width="1"/>
+  <text x="510" y="630" font-family="Arial, sans-serif" font-size="16" fill="#fff">• Per-row slices, no deblock</text>
+  <text x="510" y="650" font-family="Arial, sans-serif" font-size="16" fill="#fff">• Encodes video preview region</text>
+
+  <!-- Stitched Frame Builder -->
+  <rect x="560" y="730" width="280" height="120" rx="10" fill="url(#stitchedGrad)" stroke="#e76f51" stroke-width="2"/>
+  <text x="700" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="bold" fill="#fff">Stitched Frame Builder</text>
+  <line x1="580" y1="785" x2="820" y2="785" stroke="#ffffff40" stroke-width="1"/>
+  <text x="590" y="810" font-family="Arial, sans-serif" font-size="16" fill="#fff">• P_Skip slices (copy from ref)</text>
+  <text x="590" y="830" font-family="Arial, sans-serif" font-size="16" fill="#fff">• Transplant region slices</text>
+
+  <!-- Arrow from Encoder 2 to Stitched -->
+  <path d="M 620 670 L 620 725" stroke="#50c878" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="691" y="700" font-family="Arial, sans-serif" font-size="15" fill="#50c878">slices</text>
+
+  <!-- Output Stream Section -->
+  <rect x="950" y="300" width="900" height="500" rx="15" fill="#1e2a3a" stroke="#3a4a5a" stroke-width="2"/>
+  <text x="1400" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="bold" fill="#fff">Output H.264 Stream</text>
+
+  <!-- Timeline -->
+  <line x1="1000" y1="450" x2="1800" y2="450" stroke="#4a5568" stroke-width="3"/>
+
+  <!-- Frame boxes on timeline -->
+  <!-- Frame 1: IDR (Encoder 1) -->
+  <rect x="1020" y="400" width="80" height="100" rx="5" fill="#4a90d9" stroke="#fff" stroke-width="2"/>
+  <text x="1060" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="bold" fill="#fff">IDR</text>
+  <text x="1060" y="455" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#cce5ff">LTR 0</text>
+  <text x="1060" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Enc 1</text>
+
+  <!-- Frame 2: P (Encoder 1) -->
+  <rect x="1120" y="400" width="80" height="100" rx="5" fill="#4a90d9" stroke="#fff" stroke-width="2"/>
+  <text x="1160" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="bold" fill="#fff">P</text>
+  <text x="1160" y="455" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#cce5ff">LTR 0</text>
+  <text x="1160" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Enc 1</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1120 420 Q 1095 380 1100 420" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="1090" y="375" font-family="Arial, sans-serif" font-size="13" fill="#aaa">ref LTR0</text>
+
+  <!-- Frame 3: Stitched P_Skip -->
+  <rect x="1220" y="400" width="80" height="100" rx="5" fill="#f4a261" stroke="#fff" stroke-width="2"/>
+  <text x="1260" y="430" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#fff">P_Skip</text>
+  <text x="1260" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#ffecd2">short-term</text>
+  <text x="1260" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Stitched</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1220 430 L 1205 430" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Frame 4: Stitched with region -->
+  <rect x="1320" y="400" width="80" height="100" rx="5" fill="#f4a261" stroke="#50c878" stroke-width="3"/>
+  <text x="1360" y="425" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#fff">P_Skip</text>
+  <text x="1360" y="442" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#fff">+Region</text>
+  <text x="1360" y="460" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#ffecd2">short-term</text>
+  <text x="1360" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Stitched</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1320 430 L 1305 430" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Frame 5: Stitched with region -->
+  <rect x="1420" y="400" width="80" height="100" rx="5" fill="#f4a261" stroke="#50c878" stroke-width="3"/>
+  <text x="1460" y="425" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#fff">P_Skip</text>
+  <text x="1460" y="442" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#fff">+Region</text>
+  <text x="1460" y="460" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#ffecd2">short-term</text>
+  <text x="1460" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Stitched</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1420 430 L 1405 430" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Frame 6: P (Encoder 1) resuming -->
+  <rect x="1520" y="400" width="80" height="100" rx="5" fill="#4a90d9" stroke="#fff" stroke-width="2"/>
+  <text x="1560" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="bold" fill="#fff">P</text>
+  <text x="1560" y="455" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#cce5ff">LTR 0</text>
+  <text x="1560" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Enc 1</text>
+
+  <!-- LTR 0 reference arrow (long jump back) -->
+  <path d="M 1520 390 Q 1320 320 1200 390" stroke="#4a90d9" stroke-width="2" fill="none" stroke-dasharray="5,3" marker-end="url(#arrowheadBlue)"/>
+
+  <!-- Frame 7: P (Encoder 1) -->
+  <rect x="1620" y="400" width="80" height="100" rx="5" fill="#4a90d9" stroke="#fff" stroke-width="2"/>
+  <text x="1660" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="bold" fill="#fff">P</text>
+  <text x="1660" y="455" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#cce5ff">LTR 0</text>
+  <text x="1660" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Enc 1</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1620 420 Q 1595 380 1600 420" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Frame 8: Stitched -->
+  <rect x="1720" y="400" width="80" height="100" rx="5" fill="#f4a261" stroke="#fff" stroke-width="2"/>
+  <text x="1760" y="430" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#fff">P_Skip</text>
+  <text x="1760" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#ffecd2">short-term</text>
+  <text x="1760" y="485" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#fff">Stitched</text>
+
+  <!-- Reference arrow -->
+  <path d="M 1720 430 L 1705 430" stroke="#fff" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Legend -->
+  <rect x="1000" y="560" width="750" height="200" rx="10" fill="#2d374850" stroke="#3a4a5a" stroke-width="1"/>
+  <text x="1020" y="590" font-family="Arial, sans-serif" font-size="19" font-weight="bold" fill="#fff">Reference Rules:</text>
+
+  <!-- Legend items -->
+  <rect x="1020" y="610" width="20" height="20" rx="3" fill="#4a90d9"/>
+  <text x="1050" y="626" font-family="Arial, sans-serif" font-size="17" fill="#fff">Encoder 1 frames: Always marked as LTR 0, always reference previous LTR 0</text>
+
+  <rect x="1020" y="645" width="20" height="20" rx="3" fill="#f4a261"/>
+  <text x="1050" y="661" font-family="Arial, sans-serif" font-size="17" fill="#fff">Stitched frames: Short-term reference to previous frame (any type)</text>
+
+  <rect x="1020" y="680" width="20" height="20" rx="3" fill="#f4a261" stroke="#50c878" stroke-width="2"/>
+  <text x="1050" y="696" font-family="Arial, sans-serif" font-size="17" fill="#fff">Stitched + Region: P_Skip background + transplanted video preview slices from Encoder 2</text>
+
+  <text x="1020" y="735" font-family="Arial, sans-serif" font-size="17" fill="#aaa">Key insight: Encoder 1 can skip over stitched frames by referencing LTR 0 (its last output)</text>
+
+  <!-- Arrows from encoders to output -->
+  <path d="M 680 410 L 945 410" stroke="#4a90d9" stroke-width="2" fill="none" marker-end="url(#arrowheadBlue)"/>
+  <path d="M 840 790 L 945 550" stroke="#f4a261" stroke-width="2" fill="none" marker-end="url(#arrowheadOrange)"/>
+
+  <!-- Footer -->
+  <text x="960" y="1050" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#666">
+    NVENC Baseline H.264 | maxNumRefFrames=1 | Bitstream post-processing for LTR 0 marking
+  </text>
+</svg>
