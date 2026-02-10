@@ -1,0 +1,3 @@
+/home/wachtfogel/Projects/chrome_gpu_tracer/vulkan_layer/build/CMakeFiles/VkLayer_chrome_frame_capture.dir
+/home/wachtfogel/Projects/chrome_gpu_tracer/vulkan_layer/build/CMakeFiles/edit_cache.dir
+/home/wachtfogel/Projects/chrome_gpu_tracer/vulkan_layer/build/CMakeFiles/rebuild_cache.dir

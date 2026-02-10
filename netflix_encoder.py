@@ -11,11 +11,12 @@ Both encoders run in the Vulkan layer. Python only does NAL post-processing:
 No pixel copy. No Python-side encoding. No prediction heuristic.
 
 Usage:
-    python3 ../chrome_gpu_tracer/test_frame_classifier.py \
-        --handler netflix_encoder.py
+    python3 netflix_encoder.py [--no-launch] [--port 9222]
 """
 
+import argparse
 import json
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -23,19 +24,26 @@ from fractions import Fraction
 from pathlib import Path
 
 import av
+import pychrome
 
-# Add paths
-TRACER_PATH = Path(__file__).parent.parent / "chrome_gpu_tracer"
+# Add external library paths
 SPLICER_PATH = Path("/home/wachtfogel/h264-newpoc/splicer")
-sys.path.insert(0, str(TRACER_PATH))
 sys.path.insert(0, str(SPLICER_PATH))
 
+# Add netflix_runner to path
+RUNNER_PATH = Path(__file__).parent.parent / "netflix_runner"
+sys.path.insert(0, str(RUNNER_PATH))
+
 from frame_handler import BaseFrameHandler
+from shm_reader import FrameCaptureReader
+from frame_classifier import FrameClassifier
 from h264_splicer import (
     parse_annexb, NALUnit, BitWriter, BitReader, SPS, PPS,
     rewrite_slice_header, parse_slice_header,
     modify_sps_num_ref_frames,
 )
+
+DEFAULT_PROFILE = str(Path.home() / ".config" / "chrome-gpu-tracer-profile")
 
 
 def create_pskip_slice(first_mb, mb_count, frame_num, sps, nal_ref_idc=2, ref_ltr0=False):
@@ -627,3 +635,249 @@ class LiveSpliceHandler(BaseFrameHandler):
 
 def create_handler(fw, fh, chrome_height):
     return LiveSpliceHandler(fw, fh, chrome_height)
+
+
+# ── classify_phase (moved from test_frame_classifier.py) ─────
+
+def classify_phase(classifier, duration, label, handler=None):
+    """Run the classifier for `duration` seconds, return per-phase stats.
+
+    Args:
+        classifier: FrameClassifier instance
+        duration: How long to run this phase (seconds)
+        label: Human-readable phase name
+        handler: Optional FrameHandler to receive frame events
+    """
+    if handler is not None:
+        handler.on_phase_start(label)
+
+    # Read the layer's skip counter before and after to get exact drops
+    skips_before = classifier.reader.get_skip_count()
+
+    events = []
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < duration:
+        evt, info = classifier.next_frame_v4(timeout=0.05)
+        events.append(evt)
+        if handler is not None:
+            current_drops = classifier.reader.get_skip_count() - skips_before
+            handler.set_drop_count(current_drops)
+            handler.on_frame(evt, None, info)
+
+    skips_after = classifier.reader.get_skip_count()
+
+    counts = {"unchanged": 0, "video_only": 0, "changed": 0}
+    for e in events:
+        counts[e.category] += 1
+    total = len(events)
+    elapsed = time.monotonic() - t0
+
+    return {
+        "label": label,
+        "events": events,
+        "counts": counts,
+        "total": total,
+        "elapsed": elapsed,
+        "skipped": skips_after - skips_before,
+    }
+
+
+# ── Layer build ──────────────────────────────────────────────
+
+def get_layer_dir():
+    """Return path to our Vulkan layer directory."""
+    return Path(__file__).parent / "vulkan_layer"
+
+
+def ensure_layer_built():
+    """Build the Vulkan layer if the .so doesn't exist."""
+    layer_dir = get_layer_dir()
+    layer_so = layer_dir / "libVkLayer_chrome_frame_capture.so"
+    if layer_so.exists():
+        return str(layer_dir)
+
+    print("[setup] Building Vulkan capture layer...")
+    build_dir = layer_dir / "build"
+    build_dir.mkdir(exist_ok=True)
+    subprocess.run(["cmake", ".."], check=True, cwd=str(build_dir))
+    subprocess.run(["make"], check=True, cwd=str(build_dir))
+
+    if not layer_so.exists():
+        print("ERROR: Layer build failed — .so not found")
+        sys.exit(1)
+
+    return str(layer_dir)
+
+
+# ── Main entry point ─────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Netflix Encoder")
+    parser.add_argument("--no-launch", action="store_true",
+                        help="Connect to existing Chrome instance (skip auto-launch)")
+    parser.add_argument("--port", type=int, default=9222)
+    parser.add_argument("--profile", type=str, default=DEFAULT_PROFILE,
+                        help="Chrome profile directory")
+    args = parser.parse_args()
+
+    import runner as netflix_runner
+
+    print("=" * 60)
+    print("NETFLIX ENCODER — LAYER-SIDE DUAL ENCODER")
+    print("=" * 60)
+    print()
+
+    # Build layer if needed
+    layer_dir = ensure_layer_built()
+
+    chrome_proc = None
+
+    if not args.no_launch:
+        chrome_proc = netflix_runner.ensure_netflix_logged_in(
+            args.port, args.profile, ":99", layer_dir=layer_dir)
+
+    # ── Connect ───────────────────────────────────────────────
+    print("[setup] Connecting to Chrome...")
+    browser = pychrome.Browser(url=f"http://127.0.0.1:{args.port}")
+    tab = browser.list_tab()[0]
+    tab.start()
+    tab.Page.enable()
+    tab.DOM.enable()
+    tab.Runtime.enable()
+
+    # ── SHM reader ────────────────────────────────────────────
+    reader = FrameCaptureReader()
+    if not reader.connect(timeout=10.0):
+        shm_path = Path("/dev/shm/chrome_frame_capture")
+        if not shm_path.exists():
+            print("ERROR: SHM not available - Vulkan layer may not have loaded")
+            print("  Check that Chrome is using Vulkan (not GL fallback)")
+        else:
+            print(f"ERROR: SHM exists but reader failed to connect")
+            print(f"  SHM size: {shm_path.stat().st_size} bytes")
+        tab.stop()
+        if chrome_proc:
+            from chrome_launcher import kill_chrome
+            kill_chrome(chrome_proc)
+        return 1
+    fw, fh = reader.get_frame_dimensions()
+
+    dpr = 1.0
+    try:
+        r = tab.Runtime.evaluate(
+            expression="window.devicePixelRatio", returnByValue=True)
+        dpr = float(r.get("result", {}).get("value", 1.0))
+    except Exception:
+        pass
+    print(f"  Window: {fw}x{fh}, DPR: {dpr}")
+
+    # Navigate to Netflix browse if needed
+    url = ""
+    try:
+        r = tab.Runtime.evaluate(
+            expression="window.location.href", returnByValue=True)
+        url = r.get("result", {}).get("value", "")
+    except Exception:
+        pass
+    if "netflix.com/browse" not in url:
+        print("  Navigating to Netflix browse...")
+        tab.Page.navigate(url="https://www.netflix.com/browse")
+        time.sleep(5)
+
+    # Handle Netflix profile picker
+    for attempt in range(3):
+        r = tab.Runtime.evaluate(
+            expression='document.querySelectorAll(".profile-link").length > 1 ? "picker" : "ok"',
+            returnByValue=True)
+        if r.get("result", {}).get("value") == "picker":
+            print("  Profile picker detected — selecting first profile...")
+            tab.Runtime.evaluate(
+                expression='document.querySelector(".profile-link").click()',
+                returnByValue=True)
+            time.sleep(5)
+        else:
+            break
+
+    # Pause CSS animations on off-screen elements
+    tab.Runtime.evaluate(expression="""(() => {
+        const observer = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                entry.target.style.animationPlayState =
+                    entry.isIntersecting ? 'running' : 'paused';
+            }
+        });
+        function observeAnimated() {
+            document.querySelectorAll('*').forEach(el => {
+                if (el.getAnimations().length > 0) observer.observe(el);
+            });
+        }
+        observeAnimated();
+        setInterval(observeAnimated, 3000);
+    })()""", returnByValue=True)
+    print("  Injected off-screen animation pauser")
+
+    # Reset state
+    netflix_runner.hover(tab, 5, 5)
+    time.sleep(1)
+    tab.Runtime.evaluate(
+        expression="window.scrollTo(0, 0)", returnByValue=True)
+    time.sleep(1)
+
+    # ── Start classifier ──────────────────────────────────────
+    reader.set_capture_full()
+    classifier = FrameClassifier(tab, reader)
+    classifier.start()
+    time.sleep(0.5)
+    print(f"  Classifier started (damage rects via SHM)")
+    print()
+
+    # ── Chrome height ─────────────────────────────────────────
+    chrome_height = 0
+    try:
+        r = tab.Runtime.evaluate(
+            expression="window.outerHeight - window.innerHeight",
+            returnByValue=True)
+        chrome_height = int(r.get("result", {}).get("value", 0))
+    except Exception:
+        pass
+
+    # ── Create handler ────────────────────────────────────────
+    handler = LiveSpliceHandler(fw, fh, chrome_height)
+    print()
+
+    # ── Run phases ────────────────────────────────────────────
+    def on_phase(name, duration):
+        return classify_phase(classifier, duration, name, handler)
+
+    phases = netflix_runner.run_phases(
+        tab, on_phase, drain_video_fn=classifier._drain_video_events)
+
+    # ── Grand summary ─────────────────────────────────────────
+    netflix_runner.print_grand_summary(phases)
+
+    # ── Close handler ─────────────────────────────────────────
+    handler.close()
+    print()
+
+    # ── Cleanup ───────────────────────────────────────────────
+    classifier.stop()
+    reader.disconnect()
+
+    # Navigate away so Netflix stops consuming resources
+    try:
+        tab.Page.navigate(url="https://www.google.com")
+    except Exception:
+        pass
+
+    tab.stop()
+
+    # Kill Chrome if we launched it
+    if chrome_proc:
+        from chrome_launcher import kill_chrome
+        kill_chrome(chrome_proc)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
