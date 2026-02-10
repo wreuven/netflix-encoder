@@ -34,7 +34,6 @@ sys.path.insert(0, str(SPLICER_PATH))
 RUNNER_PATH = Path(__file__).parent.parent / "netflix_runner"
 sys.path.insert(0, str(RUNNER_PATH))
 
-from frame_handler import BaseFrameHandler
 from shm_reader import FrameCaptureReader
 from frame_classifier import FrameClassifier
 from h264_splicer import (
@@ -304,7 +303,7 @@ class StitchedFrameBuilder:
         return output_nals
 
 
-class LiveSpliceHandler(BaseFrameHandler):
+class LiveSpliceHandler:
     """
     Netflix Encoder v4: Layer-side classification + dual encoder.
 
@@ -646,7 +645,7 @@ def classify_phase(classifier, duration, label, handler=None):
         classifier: FrameClassifier instance
         duration: How long to run this phase (seconds)
         label: Human-readable phase name
-        handler: Optional BaseFrameHandler to receive frame events
+        handler: Optional LiveSpliceHandler to receive frame events
     """
     if handler is not None:
         handler.on_phase_start(label)
