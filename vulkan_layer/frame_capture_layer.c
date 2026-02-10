@@ -279,6 +279,100 @@ static uint32_t find_memory_type(fc_device_data_t *d,
     return UINT32_MAX;
 }
 
+/* ================================================================== */
+/* GPU buffer helpers (device-local, exportable to CUDA)               */
+/* ================================================================== */
+
+static int create_gpu_buffer(fc_device_data_t *d, VkDeviceSize size,
+                             VkBuffer *out_buf, VkDeviceMemory *out_mem,
+                             VkDeviceSize *out_alloc_size, int *out_fd)
+{
+    /* Buffer with external memory support */
+    VkExternalMemoryBufferCreateInfo ext_buf_info = {
+        .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkBufferCreateInfo buf_ci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext       = &ext_buf_info,
+        .size        = size,
+        .usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    if (d->fpCreateBuffer(d->device, &buf_ci, NULL, out_buf) != VK_SUCCESS) {
+        fprintf(stderr, "[FC_LAYER] create_gpu_buffer: vkCreateBuffer failed\n");
+        return -1;
+    }
+
+    VkMemoryRequirements mem_req;
+    d->fpGetBufferMemoryRequirements(d->device, *out_buf, &mem_req);
+
+    uint32_t mem_type = find_memory_type(d, mem_req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mem_type == UINT32_MAX) {
+        fprintf(stderr, "[FC_LAYER] create_gpu_buffer: no device-local memory type\n");
+        d->fpDestroyBuffer(d->device, *out_buf, NULL);
+        *out_buf = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    /* Allocate with export capability */
+    VkExportMemoryAllocateInfo export_info = {
+        .sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkMemoryAllocateInfo alloc_info = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext           = &export_info,
+        .allocationSize  = mem_req.size,
+        .memoryTypeIndex = mem_type,
+    };
+    if (d->fpAllocateMemory(d->device, &alloc_info, NULL, out_mem) != VK_SUCCESS) {
+        fprintf(stderr, "[FC_LAYER] create_gpu_buffer: vkAllocateMemory failed\n");
+        d->fpDestroyBuffer(d->device, *out_buf, NULL);
+        *out_buf = VK_NULL_HANDLE;
+        return -1;
+    }
+    d->fpBindBufferMemory(d->device, *out_buf, *out_mem, 0);
+
+    /* Export fd for CUDA import */
+    VkMemoryGetFdInfoKHR fd_info = {
+        .sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+        .memory     = *out_mem,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    if (d->fpGetMemoryFdKHR(d->device, &fd_info, out_fd) != VK_SUCCESS) {
+        fprintf(stderr, "[FC_LAYER] create_gpu_buffer: vkGetMemoryFdKHR failed\n");
+        d->fpFreeMemory(d->device, *out_mem, NULL);
+        d->fpDestroyBuffer(d->device, *out_buf, NULL);
+        *out_buf = VK_NULL_HANDLE;
+        *out_mem = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    *out_alloc_size = mem_req.size;
+    fprintf(stderr, "[FC_LAYER] GPU buffer created: %lu bytes, alloc=%lu, fd=%d\n",
+            (unsigned long)size, (unsigned long)mem_req.size, *out_fd);
+    return 0;
+}
+
+static void destroy_gpu_buffer(fc_device_data_t *d,
+                               VkBuffer *buf, VkDeviceMemory *mem)
+{
+    if (*mem) {
+        d->fpFreeMemory(d->device, *mem, NULL);
+        *mem = VK_NULL_HANDLE;
+    }
+    if (*buf) {
+        d->fpDestroyBuffer(d->device, *buf, NULL);
+        *buf = VK_NULL_HANDLE;
+    }
+}
+
+/* ================================================================== */
+/* Staging buffer + command resources                                   */
+/* ================================================================== */
+
 static void create_staging(fc_device_data_t *d) {
     VkDeviceSize size = (VkDeviceSize)d->swapchain_extent.width *
                         d->swapchain_extent.height * BYTES_PER_PIXEL;
@@ -344,6 +438,7 @@ static void create_staging(fc_device_data_t *d) {
 }
 
 static void destroy_staging(fc_device_data_t *d) {
+    /* Destroy NVENC encoders BEFORE their backing GPU buffers */
     if (d->nvenc_enc1) {
         nvenc_layer_destroy(d->nvenc_enc1);
         d->nvenc_enc1 = NULL;
@@ -354,6 +449,13 @@ static void destroy_staging(fc_device_data_t *d) {
         d->enc2_width = 0;
         d->enc2_height = 0;
     }
+
+    /* Destroy GPU buffers (device-local, exported to CUDA) */
+    destroy_gpu_buffer(d, &d->enc1_buf, &d->enc1_mem);
+    d->enc1_alloc_size = 0;
+    destroy_gpu_buffer(d, &d->enc2_buf, &d->enc2_mem);
+    d->enc2_alloc_size = 0;
+
     if (d->fence) {
         d->fpDestroyFence(d->device, d->fence, NULL);
         d->fence = VK_NULL_HANDLE;
@@ -440,37 +542,15 @@ static int classify_frame(fc_device_data_t *d)
 /* Frame capture (called from vkQueuePresentKHR)                       */
 /* ================================================================== */
 
-static void capture_frame(fc_device_data_t *d, VkQueue queue,
-                          VkImage src_image) {
-    shm_header_t *hdr = d->shm_header;
-    if (!hdr || !d->staging_mapped)
-        return;
-
-    /* Check shutdown flag */
-    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
-    if (flags & FLAG_SHUTDOWN)
-        return;
-
-    /* Don't write if reader is busy or hasn't consumed the last frame */
-    if (flags & FLAG_READER_BUSY) {
-        hdr->skip_count++;
-        return;
-    }
-    if (hdr->write_seq > 0 && hdr->read_seq < hdr->write_seq) {
-        hdr->skip_count++;
-        return;
-    }
-
-    /* Always capture full frame for classification + encoding */
-    uint32_t cap_w = d->swapchain_extent.width;
-    uint32_t cap_h = d->swapchain_extent.height;
-
-    /* Check that the copy fits in staging buffer */
-    VkDeviceSize copy_size = (VkDeviceSize)cap_w * cap_h * BYTES_PER_PIXEL;
-    if (copy_size > d->staging_size)
-        return;
-
-    /* --- Record command buffer --- */
+/*
+ * Helper: record barrier + copy + barrier into cmd_buf, submit, wait.
+ * dst_buf is a device-local VkBuffer (enc1 or enc2 GPU buffer).
+ * copy_region specifies the source rect in the swapchain image.
+ */
+static void submit_copy_to_gpu_buffer(fc_device_data_t *d, VkQueue queue,
+                                      VkImage src_image, VkBuffer dst_buf,
+                                      const VkBufferImageCopy *copy_region)
+{
     d->fpResetCommandBuffer(d->cmd_buf, 0);
 
     VkCommandBufferBeginInfo begin_info = {
@@ -502,23 +582,9 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, NULL, 0, NULL, 1, &barrier_to_src);
 
-    /* Copy full frame to staging buffer */
-    VkBufferImageCopy region = {
-        .bufferOffset      = 0,
-        .bufferRowLength   = cap_w,
-        .bufferImageHeight = cap_h,
-        .imageSubresource  = {
-            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel       = 0,
-            .baseArrayLayer = 0,
-            .layerCount     = 1,
-        },
-        .imageOffset = { 0, 0, 0 },
-        .imageExtent = { cap_w, cap_h, 1 },
-    };
     d->fpCmdCopyImageToBuffer(d->cmd_buf, src_image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        d->staging_buf, 1, &region);
+        dst_buf, 1, copy_region);
 
     /* Barrier: TRANSFER_SRC -> PRESENT_SRC */
     VkImageMemoryBarrier barrier_to_present = barrier_to_src;
@@ -534,7 +600,6 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
 
     d->fpEndCommandBuffer(d->cmd_buf);
 
-    /* Submit and wait */
     VkSubmitInfo submit_info = {
         .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
@@ -543,16 +608,38 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
     d->fpResetFences(d->device, 1, &d->fence);
     d->fpQueueSubmit(queue, 1, &submit_info, d->fence);
     d->fpWaitForFences(d->device, 1, &d->fence, VK_TRUE, UINT64_MAX);
+}
 
-    /* --- Flush damage rects before classification --- */
+static void capture_frame(fc_device_data_t *d, VkQueue queue,
+                          VkImage src_image) {
+    shm_header_t *hdr = d->shm_header;
+    if (!hdr)
+        return;
+
+    /* Check shutdown flag */
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & FLAG_SHUTDOWN)
+        return;
+
+    /* Don't write if reader is busy or hasn't consumed the last frame */
+    if (flags & FLAG_READER_BUSY) {
+        hdr->skip_count++;
+        return;
+    }
+    if (hdr->write_seq > 0 && hdr->read_seq < hdr->write_seq) {
+        hdr->skip_count++;
+        return;
+    }
+
+    uint32_t cap_w = d->swapchain_extent.width;
+    uint32_t cap_h = d->swapchain_extent.height;
+    uint32_t row_bytes = cap_w * BYTES_PER_PIXEL;
+
+    /* --- 1. Flush damage rects and classify BEFORE any GPU copy --- */
     flush_damage_to_shm(d);
-
-    /* --- Classify frame --- */
     int category = classify_frame(d);
 
-    /* --- Defaults --- */
-    uint32_t row_bytes = cap_w * BYTES_PER_PIXEL;
-    int src_stride = (int)(cap_w * BYTES_PER_PIXEL);
+    /* --- 2. Defaults --- */
     hdr->bitstream_size = 0;
     hdr->encoder2_bitstream_size = 0;
     hdr->enc2_region_mb_x = 0;
@@ -564,29 +651,64 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
     if (qp == 0) qp = 23;
 
     if (category == FRAME_CAT_CHANGED) {
-        /* --- Encode full frame with encoder1 --- */
+        /* --- 3a. Full frame → enc1 GPU buffer → NVENC --- */
+
+        /* Lazy-init enc1 GPU buffer + NVENC */
         if (!d->nvenc_enc1) {
-            d->nvenc_enc1 = nvenc_layer_init((int)cap_w, (int)cap_h, qp);
+            VkDeviceSize buf_size = (VkDeviceSize)cap_w * cap_h * BYTES_PER_PIXEL;
+            int fd = -1;
+            if (d->enc1_buf == VK_NULL_HANDLE) {
+                if (create_gpu_buffer(d, buf_size, &d->enc1_buf, &d->enc1_mem,
+                                      &d->enc1_alloc_size, &fd) < 0)
+                    goto skip_encode;
+            }
+
+            nvenc_config_t enc1_cfg = {
+                .width           = (int)cap_w,
+                .height          = (int)cap_h,
+                .qp              = qp,
+                .slice_mode      = 3,
+                .slice_mode_data = ((int)cap_h + 15) / 16,
+                .disable_deblock = 0,
+                .external_mem_fd = fd,
+                .external_mem_size = (size_t)d->enc1_alloc_size,
+            };
+            d->nvenc_enc1 = nvenc_layer_init_config(&enc1_cfg);
             if (d->nvenc_enc1)
-                fprintf(stderr, "[FC_LAYER] NVENC encoder1 (full-frame) initialized: %ux%u\n",
+                fprintf(stderr, "[FC_LAYER] NVENC encoder1 (full-frame, zero-copy) initialized: %ux%u\n",
                         cap_w, cap_h);
             else
                 fprintf(stderr, "[FC_LAYER] NVENC encoder1 init FAILED\n");
         }
 
         if (d->nvenc_enc1) {
-            VkDeviceSize px_size = (VkDeviceSize)cap_h * row_bytes;
+            /* GPU copy: swapchain → enc1 device-local buffer */
+            VkBufferImageCopy region = {
+                .bufferOffset      = 0,
+                .bufferRowLength   = cap_w,
+                .bufferImageHeight = cap_h,
+                .imageSubresource  = {
+                    .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel       = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount     = 1,
+                },
+                .imageOffset = { 0, 0, 0 },
+                .imageExtent = { cap_w, cap_h, 1 },
+            };
+            submit_copy_to_gpu_buffer(d, queue, src_image, d->enc1_buf, &region);
+
+            /* Encode directly from GPU memory */
             uint8_t *bs_out = (uint8_t *)hdr + SHM_ENC1_BITSTREAM_OFFSET;
-            int bs_size = nvenc_layer_encode(d->nvenc_enc1, d->staging_mapped,
-                                             (size_t)px_size, 0,
-                                             bs_out, SHM_ENC1_BITSTREAM_MAX);
+            int bs_size = nvenc_layer_encode_gpu(d->nvenc_enc1, 0,
+                                                 bs_out, SHM_ENC1_BITSTREAM_MAX);
             hdr->bitstream_size = (bs_size > 0) ? (uint32_t)bs_size : 0;
         }
 
         d->enc2_needs_idr = 1;
 
     } else if (category == FRAME_CAT_VIDEO_ONLY) {
-        /* --- Compute padded region (video_rect + 1 MB border, MB-aligned) --- */
+        /* --- 3b. Region crop → enc2 GPU buffer → NVENC --- */
         int padding_px = 16;  /* 1 MB border */
         int vx = hdr->video_rect_x;
         int vy = hdr->video_rect_y;
@@ -609,29 +731,41 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
         if (padded_w >= 32 && padded_h >= 32) {
             int size_changed = (padded_w != d->enc2_width || padded_h != d->enc2_height);
 
-            /* Reinit encoder2 if region size changed */
-            if (d->nvenc_enc2 && size_changed) {
-                nvenc_layer_destroy(d->nvenc_enc2);
-                d->nvenc_enc2 = NULL;
+            /* Reinit encoder2 + GPU buffer if region size changed */
+            if (size_changed) {
+                if (d->nvenc_enc2) {
+                    nvenc_layer_destroy(d->nvenc_enc2);
+                    d->nvenc_enc2 = NULL;
+                }
+                destroy_gpu_buffer(d, &d->enc2_buf, &d->enc2_mem);
+                d->enc2_alloc_size = 0;
             }
 
             if (!d->nvenc_enc2) {
-                int height_mbs = (padded_h + 15) / 16;
+                VkDeviceSize buf_size = (VkDeviceSize)padded_w * padded_h * BYTES_PER_PIXEL;
+                int fd = -1;
+                if (d->enc2_buf == VK_NULL_HANDLE) {
+                    if (create_gpu_buffer(d, buf_size, &d->enc2_buf, &d->enc2_mem,
+                                          &d->enc2_alloc_size, &fd) < 0)
+                        goto skip_encode;
+                }
+
                 nvenc_config_t enc2_cfg = {
-                    .width          = padded_w,
-                    .height         = padded_h,
-                    .qp             = qp,
-                    .slice_mode     = 2,     /* MB rows per slice */
-                    .slice_mode_data = 1,    /* 1 MB row per slice */
-                    .disable_deblock = 1,    /* deblocking OFF for splicing */
+                    .width           = padded_w,
+                    .height          = padded_h,
+                    .qp              = qp,
+                    .slice_mode      = 2,     /* MB rows per slice */
+                    .slice_mode_data = 1,     /* 1 MB row per slice */
+                    .disable_deblock = 1,     /* deblocking OFF for splicing */
+                    .external_mem_fd = fd,
+                    .external_mem_size = (size_t)d->enc2_alloc_size,
                 };
-                (void)height_mbs;
                 d->nvenc_enc2 = nvenc_layer_init_config(&enc2_cfg);
                 if (d->nvenc_enc2) {
                     d->enc2_width = padded_w;
                     d->enc2_height = padded_h;
-                    d->enc2_needs_idr = 1;  /* new encoder always starts with IDR */
-                    fprintf(stderr, "[FC_LAYER] NVENC encoder2 (region) initialized: %dx%d\n",
+                    d->enc2_needs_idr = 1;
+                    fprintf(stderr, "[FC_LAYER] NVENC encoder2 (region, zero-copy) initialized: %dx%d\n",
                             padded_w, padded_h);
                 } else {
                     fprintf(stderr, "[FC_LAYER] NVENC encoder2 init FAILED\n");
@@ -639,12 +773,27 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
             }
 
             if (d->nvenc_enc2) {
+                /* GPU copy: swapchain region → enc2 device-local buffer */
+                VkBufferImageCopy region = {
+                    .bufferOffset      = 0,
+                    .bufferRowLength   = (uint32_t)padded_w,
+                    .bufferImageHeight = (uint32_t)padded_h,
+                    .imageSubresource  = {
+                        .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .mipLevel       = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount     = 1,
+                    },
+                    .imageOffset = { padded_x, padded_y, 0 },
+                    .imageExtent = { (uint32_t)padded_w, (uint32_t)padded_h, 1 },
+                };
+                submit_copy_to_gpu_buffer(d, queue, src_image, d->enc2_buf, &region);
+
+                /* Encode directly from GPU memory */
                 int force_idr = d->enc2_needs_idr || size_changed;
                 uint8_t *bs_out = (uint8_t *)hdr + SHM_ENC2_BITSTREAM_OFFSET;
-                int bs_size = nvenc_layer_encode_region(d->nvenc_enc2,
-                    d->staging_mapped, src_stride,
-                    padded_x, padded_y, padded_w, padded_h,
-                    force_idr, bs_out, SHM_ENC2_BITSTREAM_MAX);
+                int bs_size = nvenc_layer_encode_gpu(d->nvenc_enc2, force_idr,
+                                                     bs_out, SHM_ENC2_BITSTREAM_MAX);
                 hdr->encoder2_bitstream_size = (bs_size > 0) ? (uint32_t)bs_size : 0;
                 hdr->enc2_region_mb_x = padded_x / 16;
                 hdr->enc2_region_mb_y = padded_y / 16;
@@ -655,14 +804,9 @@ static void capture_frame(fc_device_data_t *d, VkQueue queue,
         }
         /* else: region too small, category stays VIDEO_ONLY but no bitstream */
     }
-    /* FRAME_CAT_UNCHANGED: no encoding, no pixel copy */
+    /* FRAME_CAT_UNCHANGED: no GPU copy, no encoding */
 
-    /* --- Optional debug pixel copy --- */
-    if (flags & FLAG_COPY_PIXELS) {
-        VkDeviceSize px_size = (VkDeviceSize)cap_h * row_bytes;
-        memcpy(d->shm_data, d->staging_mapped, (size_t)px_size);
-    }
-
+skip_encode:
     /* Update header */
     hdr->frame_category  = (uint32_t)category;
     hdr->captured_x      = 0;
@@ -816,6 +960,7 @@ FC_CreateDevice(VkPhysicalDevice physicalDevice,
     RESOLVE(DestroyFence);
     RESOLVE(WaitForFences);
     RESOLVE(ResetFences);
+    RESOLVE(GetMemoryFdKHR);
 #undef RESOLVE
 
     /* Resolve physical device memory properties via instance */
@@ -957,7 +1102,7 @@ FC_QueuePresentKHR(VkQueue queue,
                    const VkPresentInfoKHR *pPresentInfo)
 {
     fc_device_data_t *d = find_device_by_queue(queue);
-    if (d && d->shm_header && d->staging_mapped &&
+    if (d && d->shm_header && d->cmd_buf &&
         pPresentInfo->swapchainCount > 0 &&
         d->swapchain_images)
     {

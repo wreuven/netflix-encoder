@@ -32,6 +32,40 @@ typedef CUresult (*PFN_cuMemAlloc)(CUdeviceptr *, size_t);
 typedef CUresult (*PFN_cuMemFree)(CUdeviceptr);
 typedef CUresult (*PFN_cuMemcpyHtoD)(CUdeviceptr, const void *, size_t);
 
+/* CUDA external memory (Vulkan interop) */
+typedef CUresult (*PFN_cuImportExternalMemory)(void **, const void *);
+typedef CUresult (*PFN_cuExternalMemoryGetMappedBuffer)(CUdeviceptr *, void *, const void *);
+typedef CUresult (*PFN_cuDestroyExternalMemory)(void *);
+
+#define CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD 1
+
+typedef struct {
+    uint64_t dummy[2];  /* reserved */
+} CUDA_EXTERNAL_MEMORY_HANDLE_DESC_v1_placeholder;
+
+/*
+ * We define the CUDA descriptor structs ourselves since we dlopen CUDA.
+ * These must match the CUDA driver API ABI.
+ */
+typedef struct {
+    int      handleType;          /* CUexternalMemoryHandleType */
+    union {
+        int  fd;
+        struct { void *handle; const void *name; } win32;
+        const void *nvSciBufObject;
+    } handle;
+    uint64_t size;
+    unsigned int flags;
+    unsigned int reserved[16];
+} cuda_ext_mem_handle_desc_t;
+
+typedef struct {
+    uint64_t offset;
+    uint64_t size;
+    unsigned int flags;
+    unsigned int reserved[16];
+} cuda_ext_mem_buf_desc_t;
+
 typedef NVENCSTATUS (NVENCAPI *PFN_NvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST *);
 
 /* ================================================================== */
@@ -66,9 +100,12 @@ struct nvenc_ctx {
     size_t frame_size;   /* width * height * 4 */
     int    frame_count;
 
-    /* Host staging buffer for region crop */
-    uint8_t *host_buf;
-    size_t   host_buf_size;
+    /* External memory (Vulkan interop) */
+    void *ext_mem;          /* CUexternalMemory handle, NULL when using cuMemAlloc */
+    int   uses_external;    /* 1 = external memory from Vulkan fd */
+    PFN_cuImportExternalMemory          cuImportExternalMemory;
+    PFN_cuExternalMemoryGetMappedBuffer cuExternalMemoryGetMappedBuffer;
+    PFN_cuDestroyExternalMemory         cuDestroyExternalMemory;
 };
 
 /* ================================================================== */
@@ -210,12 +247,65 @@ nvenc_ctx_t *nvenc_layer_init_config(const nvenc_config_t *config)
         goto fail_cuda;
     }
 
-    /* --- Allocate CUDA device memory for one ARGB frame --- */
-    if (ctx->cuMemAlloc(&ctx->dev_ptr, ctx->frame_size) != CUDA_SUCCESS) {
-        fprintf(stderr, "[NVENC_LAYER] cuMemAlloc failed for %zu bytes\n", ctx->frame_size);
-        ctx->api.nvEncDestroyEncoder(ctx->encoder);
-        ctx->encoder = NULL;
-        goto fail_cuda;
+    /* --- Allocate or import CUDA device memory for one ARGB frame --- */
+    if (config->external_mem_fd >= 0) {
+        /* Import Vulkan device-local memory via POSIX fd */
+        ctx->cuImportExternalMemory =
+            (PFN_cuImportExternalMemory)dlsym(ctx->cuda_lib, "cuImportExternalMemory");
+        ctx->cuExternalMemoryGetMappedBuffer =
+            (PFN_cuExternalMemoryGetMappedBuffer)dlsym(ctx->cuda_lib, "cuExternalMemoryGetMappedBuffer");
+        ctx->cuDestroyExternalMemory =
+            (PFN_cuDestroyExternalMemory)dlsym(ctx->cuda_lib, "cuDestroyExternalMemory");
+
+        if (!ctx->cuImportExternalMemory || !ctx->cuExternalMemoryGetMappedBuffer ||
+            !ctx->cuDestroyExternalMemory) {
+            fprintf(stderr, "[NVENC_LAYER] Failed to resolve CUDA external memory symbols\n");
+            ctx->api.nvEncDestroyEncoder(ctx->encoder);
+            ctx->encoder = NULL;
+            goto fail_cuda;
+        }
+
+        cuda_ext_mem_handle_desc_t hdesc;
+        memset(&hdesc, 0, sizeof(hdesc));
+        hdesc.handleType = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
+        hdesc.handle.fd  = config->external_mem_fd;
+        hdesc.size       = config->external_mem_size;
+
+        CUresult cr = ctx->cuImportExternalMemory(&ctx->ext_mem, &hdesc);
+        if (cr != CUDA_SUCCESS) {
+            fprintf(stderr, "[NVENC_LAYER] cuImportExternalMemory failed: %d\n", cr);
+            ctx->api.nvEncDestroyEncoder(ctx->encoder);
+            ctx->encoder = NULL;
+            goto fail_cuda;
+        }
+        /* fd ownership transferred to CUDA, don't close it ourselves */
+
+        cuda_ext_mem_buf_desc_t bdesc;
+        memset(&bdesc, 0, sizeof(bdesc));
+        bdesc.offset = 0;
+        bdesc.size   = ctx->frame_size;
+
+        cr = ctx->cuExternalMemoryGetMappedBuffer(&ctx->dev_ptr, ctx->ext_mem, &bdesc);
+        if (cr != CUDA_SUCCESS) {
+            fprintf(stderr, "[NVENC_LAYER] cuExternalMemoryGetMappedBuffer failed: %d\n", cr);
+            ctx->cuDestroyExternalMemory(ctx->ext_mem);
+            ctx->ext_mem = NULL;
+            ctx->api.nvEncDestroyEncoder(ctx->encoder);
+            ctx->encoder = NULL;
+            goto fail_cuda;
+        }
+
+        ctx->uses_external = 1;
+        fprintf(stderr, "[NVENC_LAYER] External memory imported: fd=%d, size=%zu, dev_ptr=%p\n",
+                config->external_mem_fd, config->external_mem_size, (void *)ctx->dev_ptr);
+    } else {
+        /* Legacy path: allocate CUDA device memory */
+        if (ctx->cuMemAlloc(&ctx->dev_ptr, ctx->frame_size) != CUDA_SUCCESS) {
+            fprintf(stderr, "[NVENC_LAYER] cuMemAlloc failed for %zu bytes\n", ctx->frame_size);
+            ctx->api.nvEncDestroyEncoder(ctx->encoder);
+            ctx->encoder = NULL;
+            goto fail_cuda;
+        }
     }
 
     /* --- Register CUDA resource with NVENC --- */
@@ -232,7 +322,10 @@ nvenc_ctx_t *nvenc_layer_init_config(const nvenc_config_t *config)
     st = ctx->api.nvEncRegisterResource(ctx->encoder, &reg);
     if (st != NV_ENC_SUCCESS) {
         fprintf(stderr, "[NVENC_LAYER] nvEncRegisterResource failed: %d\n", st);
-        ctx->cuMemFree(ctx->dev_ptr);
+        if (ctx->uses_external)
+            ctx->cuDestroyExternalMemory(ctx->ext_mem);
+        else
+            ctx->cuMemFree(ctx->dev_ptr);
         ctx->api.nvEncDestroyEncoder(ctx->encoder);
         ctx->encoder = NULL;
         goto fail_cuda;
@@ -246,16 +339,20 @@ nvenc_ctx_t *nvenc_layer_init_config(const nvenc_config_t *config)
     if (st != NV_ENC_SUCCESS) {
         fprintf(stderr, "[NVENC_LAYER] nvEncCreateBitstreamBuffer failed: %d\n", st);
         ctx->api.nvEncUnregisterResource(ctx->encoder, ctx->registered_resource);
-        ctx->cuMemFree(ctx->dev_ptr);
+        if (ctx->uses_external)
+            ctx->cuDestroyExternalMemory(ctx->ext_mem);
+        else
+            ctx->cuMemFree(ctx->dev_ptr);
         ctx->api.nvEncDestroyEncoder(ctx->encoder);
         ctx->encoder = NULL;
         goto fail_cuda;
     }
     ctx->bitstream_buffer = bs.bitstreamBuffer;
 
-    fprintf(stderr, "[NVENC_LAYER] Encoder initialized: %dx%d, QP=%d, slice_mode=%d/%d, deblock=%s, ARGB\n",
+    fprintf(stderr, "[NVENC_LAYER] Encoder initialized: %dx%d, QP=%d, slice_mode=%d/%d, deblock=%s, ARGB, %s\n",
             width, height, qp, config->slice_mode, config->slice_mode_data,
-            config->disable_deblock ? "OFF" : "ON");
+            config->disable_deblock ? "OFF" : "ON",
+            ctx->uses_external ? "external-mem" : "cuMemAlloc");
 
     return ctx;
 
@@ -275,12 +372,13 @@ nvenc_ctx_t *nvenc_layer_init(int width, int height, int qp)
 {
     int height_mbs = (height + 15) / 16;
     nvenc_config_t cfg = {
-        .width          = width,
-        .height         = height,
-        .qp             = qp,
-        .slice_mode     = 3,
+        .width           = width,
+        .height          = height,
+        .qp              = qp,
+        .slice_mode      = 3,
         .slice_mode_data = height_mbs,
         .disable_deblock = 0,
+        .external_mem_fd = -1,
     };
     return nvenc_layer_init_config(&cfg);
 }
@@ -356,43 +454,68 @@ int nvenc_layer_encode(nvenc_ctx_t *ctx, const void *bgra_data, size_t bgra_size
 }
 
 /* ================================================================== */
-/* Encode Region (crop from larger buffer)                              */
+/* Encode from GPU memory (zero-copy)                                   */
 /* ================================================================== */
 
-int nvenc_layer_encode_region(nvenc_ctx_t *ctx,
-    const void *src_data, int src_stride,
-    int crop_x, int crop_y, int crop_w, int crop_h,
-    int force_idr, uint8_t *out_buf, size_t out_buf_size)
+int nvenc_layer_encode_gpu(nvenc_ctx_t *ctx, int force_idr,
+                           uint8_t *out_buf, size_t out_buf_size)
 {
     if (!ctx || !ctx->encoder)
         return -1;
 
-    if (crop_w != ctx->width || crop_h != ctx->height) {
-        fprintf(stderr, "[NVENC_LAYER] encode_region: crop %dx%d != encoder %dx%d\n",
-                crop_w, crop_h, ctx->width, ctx->height);
+    /* No cuMemcpyHtoD — pixels are already on-device via Vulkan external memory */
+
+    /* Map registered resource */
+    NV_ENC_MAP_INPUT_RESOURCE map = { 0 };
+    map.version            = NV_ENC_MAP_INPUT_RESOURCE_VER;
+    map.registeredResource = ctx->registered_resource;
+
+    NVENCSTATUS st = ctx->api.nvEncMapInputResource(ctx->encoder, &map);
+    if (st != NV_ENC_SUCCESS)
+        return -1;
+
+    /* Encode */
+    NV_ENC_PIC_PARAMS pic = { 0 };
+    pic.version         = NV_ENC_PIC_PARAMS_VER;
+    pic.inputWidth      = (uint32_t)ctx->width;
+    pic.inputHeight     = (uint32_t)ctx->height;
+    pic.inputPitch      = (uint32_t)ctx->pitch;
+    pic.inputBuffer     = map.mappedResource;
+    pic.outputBitstream = ctx->bitstream_buffer;
+    pic.bufferFmt       = NV_ENC_BUFFER_FORMAT_ARGB;
+    pic.pictureStruct   = NV_ENC_PIC_STRUCT_FRAME;
+
+    if (force_idr || ctx->frame_count == 0)
+        pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
+
+    st = ctx->api.nvEncEncodePicture(ctx->encoder, &pic);
+    if (st != NV_ENC_SUCCESS) {
+        ctx->api.nvEncUnmapInputResource(ctx->encoder, map.mappedResource);
         return -1;
     }
 
-    /* Ensure host staging buffer exists */
-    if (!ctx->host_buf || ctx->host_buf_size < ctx->frame_size) {
-        free(ctx->host_buf);
-        ctx->host_buf = malloc(ctx->frame_size);
-        ctx->host_buf_size = ctx->frame_size;
-        if (!ctx->host_buf)
-            return -1;
+    /* Lock and copy bitstream */
+    NV_ENC_LOCK_BITSTREAM lock = { 0 };
+    lock.version         = NV_ENC_LOCK_BITSTREAM_VER;
+    lock.outputBitstream = ctx->bitstream_buffer;
+
+    st = ctx->api.nvEncLockBitstream(ctx->encoder, &lock);
+    if (st != NV_ENC_SUCCESS) {
+        ctx->api.nvEncUnmapInputResource(ctx->encoder, map.mappedResource);
+        return -1;
     }
 
-    /* Row-by-row crop into contiguous host buffer */
-    const uint8_t *src = (const uint8_t *)src_data;
-    int row_bytes = crop_w * 4;
-    for (int row = 0; row < crop_h; row++) {
-        const uint8_t *src_row = src + (size_t)(crop_y + row) * src_stride + (size_t)crop_x * 4;
-        memcpy(ctx->host_buf + (size_t)row * row_bytes, src_row, row_bytes);
+    int result = -1;
+    if (lock.bitstreamSizeInBytes <= out_buf_size) {
+        memcpy(out_buf, lock.bitstreamBufferPtr, lock.bitstreamSizeInBytes);
+        result = (int)lock.bitstreamSizeInBytes;
     }
 
-    /* Encode the contiguous buffer */
-    return nvenc_layer_encode(ctx, ctx->host_buf, ctx->frame_size,
-                              force_idr, out_buf, out_buf_size);
+    ctx->api.nvEncUnlockBitstream(ctx->encoder, ctx->bitstream_buffer);
+    ctx->api.nvEncUnmapInputResource(ctx->encoder, map.mappedResource);
+
+    ctx->frame_count++;
+    return result;
 }
 
 /* ================================================================== */
@@ -412,8 +535,14 @@ void nvenc_layer_destroy(nvenc_ctx_t *ctx)
         ctx->api.nvEncDestroyEncoder(ctx->encoder);
     }
 
-    if (ctx->dev_ptr)
-        ctx->cuMemFree(ctx->dev_ptr);
+    if (ctx->uses_external) {
+        if (ctx->ext_mem)
+            ctx->cuDestroyExternalMemory(ctx->ext_mem);
+        /* dev_ptr is a mapping from external memory, not a cuMemAlloc — don't cuMemFree */
+    } else {
+        if (ctx->dev_ptr)
+            ctx->cuMemFree(ctx->dev_ptr);
+    }
     if (ctx->cu_ctx)
         ctx->cuCtxDestroy(ctx->cu_ctx);
     if (ctx->nvenc_lib)
@@ -421,6 +550,5 @@ void nvenc_layer_destroy(nvenc_ctx_t *ctx)
     if (ctx->cuda_lib)
         dlclose(ctx->cuda_lib);
 
-    free(ctx->host_buf);
     free(ctx);
 }

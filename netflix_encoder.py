@@ -416,6 +416,14 @@ class LiveSpliceHandler:
         self.output_container.mux(pkt)
         self.output_frame_count += 1
 
+    def on_phase_start(self, label):
+        """Called at the start of each phase."""
+        pass
+
+    def set_drop_count(self, count):
+        """Called to update the current drop count."""
+        pass
+
     def on_frame(self, evt, pixels, info):
         """Process a frame. pixels is always None in v4. Bitstreams come via info."""
         if self.start_time is None:

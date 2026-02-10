@@ -21,6 +21,8 @@ typedef struct {
     int slice_mode;        /* 2=MB rows per slice, 3=total slices */
     int slice_mode_data;
     int disable_deblock;   /* 0=deblocking ON, 1=deblocking OFF */
+    int    external_mem_fd;   /* -1 = use cuMemAlloc (legacy), >= 0 = import from Vulkan */
+    size_t external_mem_size; /* Vulkan allocation size for import */
 } nvenc_config_t;
 
 /*
@@ -62,18 +64,16 @@ int nvenc_layer_encode(nvenc_ctx_t *ctx, const void *bgra_data, size_t bgra_size
                        int force_idr, uint8_t *out_buf, size_t out_buf_size);
 
 /*
- * Encode a cropped region from a larger source buffer.
+ * Encode from GPU memory (zero-copy path).
  *
- * The source buffer has stride src_stride bytes per row (full frame width * 4).
- * The crop rectangle (crop_x, crop_y, crop_w, crop_h) specifies the region
- * to extract and encode.  crop_w and crop_h must match the encoder's dimensions.
+ * Assumes the Vulkan layer has already copied pixels into the device-local
+ * buffer that backs this encoder's CUDA device pointer (via external memory).
+ * Skips cuMemcpyHtoD entirely — just map → encode → lock → copy → unlock.
  *
  * Returns the number of bytes written to out_buf, or -1 on error.
  */
-int nvenc_layer_encode_region(nvenc_ctx_t *ctx,
-    const void *src_data, int src_stride,
-    int crop_x, int crop_y, int crop_w, int crop_h,
-    int force_idr, uint8_t *out_buf, size_t out_buf_size);
+int nvenc_layer_encode_gpu(nvenc_ctx_t *ctx, int force_idr,
+                           uint8_t *out_buf, size_t out_buf_size);
 
 /*
  * Destroy the encoder and free all resources.

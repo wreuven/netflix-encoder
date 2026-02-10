@@ -86,15 +86,30 @@ typedef struct {
     /* Physical device memory properties (for finding host-visible heap) */
     PFN_vkGetPhysicalDeviceMemoryProperties fpGetPhysicalDeviceMemoryProperties;
 
-    /* ---- Capture resources (created when swapchain is created) ---- */
+    /* External memory (Vulkan-CUDA interop) */
+    PFN_vkGetMemoryFdKHR fpGetMemoryFdKHR;
+
+    /* ---- Command resources (created when swapchain is created) ---- */
     VkCommandPool    cmd_pool;
     VkCommandBuffer  cmd_buf;
     VkFence          fence;
+    uint32_t         queue_family;     /* queue family used for transfer */
+
+    /* ---- Host staging buffer (debug pixel copy only) ---- */
     VkBuffer         staging_buf;
     VkDeviceMemory   staging_mem;
     void            *staging_mapped;   /* persistently mapped */
     VkDeviceSize     staging_size;
-    uint32_t         queue_family;     /* queue family used for transfer */
+
+    /* ---- Encoder 1 GPU buffer (device-local, full frame, lazy-init) ---- */
+    VkBuffer         enc1_buf;
+    VkDeviceMemory   enc1_mem;
+    VkDeviceSize     enc1_alloc_size;
+
+    /* ---- Encoder 2 GPU buffer (device-local, region, recreated on size change) ---- */
+    VkBuffer         enc2_buf;
+    VkDeviceMemory   enc2_mem;
+    VkDeviceSize     enc2_alloc_size;
 
     /* ---- Swapchain tracking ---- */
     VkSwapchainKHR   swapchain;

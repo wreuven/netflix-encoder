@@ -68,7 +68,6 @@ typedef struct {
 #define FLAG_CAPTURE_SUBRECT  (1u << 2)
 #define FLAG_READER_BUSY      (1u << 3)
 #define FLAG_SHUTDOWN         (1u << 4)
-#define FLAG_COPY_PIXELS      (1u << 5)  /* Debug: layer also copies pixels to SHM */
 
 typedef struct {
     /* Identification */
