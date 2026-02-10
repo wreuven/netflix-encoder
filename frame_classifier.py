@@ -1,24 +1,20 @@
 """
-Frame classifier: combines SHM capture with Vulkan damage rects from
-VK_KHR_incremental_present and requestVideoFrameCallback to classify
-each compositor frame.
+Frame classifier: combines SHM capture with requestVideoFrameCallback
+to track video state and feed it to the Vulkan layer for classification.
 
-Categories:
-  UNCHANGED  — no new compositor frame from SHM / empty damage rects
+The layer reads video state from SHM and classifies each frame:
+  UNCHANGED  — no new compositor frame / empty damage rects
   VIDEO_ONLY — only the video element updated (damage within video bounds)
   CHANGED    — DOM/CSS repaint or compositor-level change (scroll, etc.)
 
-The Vulkan layer extracts damage rects from VkPresentRegionsKHR and
-writes them into the SHM header.  These are in swapchain (device pixel)
-coordinates which include browser chrome, so a chrome_height offset is
-applied when comparing against CSS video rects from
-getBoundingClientRect().
+Python's role is JS video tracking (requestVideoFrameCallback) and writing
+video rect + playing state to SHM. The layer does the actual classification
+and encoding atomically.
 """
 
 import json
-import sys
-import threading
 import time
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -104,10 +100,8 @@ class _VideoFrameEvent:
 
 class FrameClassifier:
     """
-    Classify compositor frames using two signals:
-
-    1. Vulkan damage rects from VK_KHR_incremental_present (via SHM)
-    2. requestVideoFrameCallback — a video frame was composited
+    Track video state via requestVideoFrameCallback and write it to SHM.
+    The Vulkan layer reads this state and classifies frames.
     """
 
     def __init__(self, tab: pychrome.Tab, reader: FrameCaptureReader):
@@ -190,7 +184,7 @@ class FrameClassifier:
             with self._lock:
                 self._video_events.append(evt)
 
-            # v4: Write video state to SHM immediately
+            # Write video state to SHM immediately
             dx = int(evt.x * self._dpr)
             dy = int((evt.y + self._chrome_height) * self._dpr)
             dw = int(evt.w * self._dpr)
@@ -221,163 +215,6 @@ class FrameClassifier:
         except Exception:
             return False
 
-    def next_frame(self, timeout: float = 0.1) -> Optional[FrameEvent]:
-        """
-        Poll SHM for the next frame and classify it.
-
-        Returns FrameEvent or None if no new frame within timeout.
-        """
-        result = self.reader.read_frame(timeout=timeout)
-
-        video_events = self._drain_video_events()
-
-        if result is None:
-            return FrameEvent(
-                category="unchanged",
-                timestamp=time.monotonic(),
-            )
-
-        arr, info = result
-        tile_rect = (info.x, info.y, info.width, info.height)
-
-        return self._classify(info.damage_rects, video_events, tile_rect)
-
-    def next_frame_with_pixels(self, timeout: float = 0.1):
-        """
-        Like next_frame() but also returns raw pixel data.
-
-        Returns (FrameEvent, numpy_array | None, FrameInfo | None).
-        """
-        result = self.reader.read_frame(timeout=timeout)
-
-        video_events = self._drain_video_events()
-
-        if result is None:
-            return (
-                FrameEvent(category="unchanged", timestamp=time.monotonic()),
-                None,
-                None,
-            )
-
-        arr, info = result
-        tile_rect = (info.x, info.y, info.width, info.height)
-        evt = self._classify(info.damage_rects, video_events, tile_rect)
-        return evt, arr, info
-
-    @staticmethod
-    def _damage_within_video_rect(damage_rects: List[DamageRect],
-                                  video_rect: Tuple[int, int, int, int],
-                                  dpr: float,
-                                  chrome_height: int = 0,
-                                  tolerance: int = 4) -> bool:
-        """Check if all damage rects fall within the video rect.
-
-        Converts CSS video_rect to device (swapchain) pixels via DPR and
-        chrome_height offset.  CSS getBoundingClientRect() is relative to
-        the viewport (below browser chrome), while Vulkan damage rects are
-        in swapchain coordinates (includes browser chrome).
-        """
-        vx = int(video_rect[0] * dpr) - tolerance
-        vy = int((video_rect[1] + chrome_height) * dpr) - tolerance
-        vr = int((video_rect[0] + video_rect[2]) * dpr) + tolerance
-        vb = int((video_rect[1] + chrome_height + video_rect[3]) * dpr) + tolerance
-
-        for dr in damage_rects:
-            if dr.x < vx or dr.y < vy:
-                return False
-            if dr.x + int(dr.width) > vr or dr.y + int(dr.height) > vb:
-                return False
-        return True
-
-    def _classify(self, damage_rects, video_events, tile_rect):
-        """Classify a frame based on damage rects and video events.
-
-        Chrome's display compositor (viz) sends exactly one VkRectLayerKHR
-        per present — the bounding box of all dirty regions.  When only
-        the video texture updates, this bbox equals the video element rect
-        exactly.  When anything else also changes (DOM repaint, hover
-        state, row animation), the bbox grows to encompass both, so the
-        containment check correctly detects the non-video change.
-
-        With damage rects (Vulkan VK_KHR_incremental_present):
-        | damage_rects | video callback            | Result     |
-        |--------------|---------------------------|------------|
-        | empty        | no                        | UNCHANGED  |
-        | empty        | yes or recent (<200ms)    | VIDEO_ONLY |
-        | non-empty    | all within video_rect     | VIDEO_ONLY |
-        | non-empty    | any outside video_rect    | CHANGED    |
-
-        Without damage rects (X11 / extension absent):
-        | video callback            | Result     |
-        |---------------------------|------------|
-        | yes or recent (<200ms)    | VIDEO_ONLY |
-        | no                        | CHANGED    |
-        """
-        now = time.monotonic()
-
-        if video_events:
-            latest = video_events[-1]
-            self._last_video_rect = (latest.x, latest.y, latest.w, latest.h)
-            self._last_video_time = now
-
-        # damage_rects is None means the Vulkan layer is not working
-        if damage_rects is None:
-            raise RuntimeError(
-                "Damage rects not available — Vulkan layer not loaded. "
-                "Ensure Chrome is launched with VK_LAYER_PATH and CHROME_FRAME_CAPTURE=1"
-            )
-
-        # Empty damage rects: nothing changed on the Vulkan side
-        if len(damage_rects) == 0:
-            recent_video = (self._last_video_rect is not None
-                            and now - self._last_video_time < 0.2)
-            if video_events or recent_video:
-                return FrameEvent(
-                    category="video_only",
-                    video_rect=self._last_video_rect,
-                    tile_rect=tile_rect,
-                    damage_rects=damage_rects,
-                    timestamp=now,
-                )
-            # Check if any video is playing on the page (including hero)
-            # If so, treat as CHANGED to ensure we capture those frames
-            if self._any_video_playing():
-                return FrameEvent(
-                    category="changed",
-                    tile_rect=tile_rect,
-                    damage_rects=damage_rects,
-                    timestamp=now,
-                )
-            return FrameEvent(
-                category="unchanged",
-                tile_rect=tile_rect,
-                damage_rects=damage_rects,
-                timestamp=now,
-            )
-
-        # Non-empty damage rects: check if all within video rect
-        video_rect = self._last_video_rect
-        if video_rect and (video_events or
-                           now - self._last_video_time < 0.2):
-            if self._damage_within_video_rect(damage_rects, video_rect,
-                                              self._dpr,
-                                              self._chrome_height):
-                return FrameEvent(
-                    category="video_only",
-                    video_rect=video_rect,
-                    tile_rect=tile_rect,
-                    damage_rects=damage_rects,
-                    timestamp=now,
-                )
-
-        # Damage rects exist outside video area → CHANGED
-        return FrameEvent(
-            category="changed",
-            tile_rect=tile_rect,
-            damage_rects=damage_rects,
-            timestamp=now,
-        )
-
     def _maybe_check_video_playing(self):
         """Periodically check if any video is playing and write to SHM."""
         now = time.monotonic()
@@ -387,7 +224,7 @@ class FrameClassifier:
 
     def next_frame_v4(self, timeout: float = 0.1):
         """
-        v4: Read frame from SHM (no pixels). Classification done by layer.
+        Read frame from SHM (no pixels). Classification done by layer.
 
         Drains video events (updates SHM video state), reads frame header +
         category + bitstreams from SHM.

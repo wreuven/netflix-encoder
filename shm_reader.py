@@ -1,18 +1,18 @@
 """
-Shared memory reader for VK_LAYER_CHROME_frame_capture.
+Shared memory reader for VK_LAYER_CHROME_frame_capture (v4).
 
-Reads pixel data from the POSIX shared memory region populated by the
-Vulkan capture layer.  Uses struct to mirror the C shm_header_t layout.
+Reads frame metadata, classification, and encoded bitstreams from the
+POSIX shared memory region populated by the Vulkan capture layer.
+No pixel data is copied — NVENC encodes directly from GPU memory.
 """
 
 import mmap
 import os
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
-import numpy as np
 
 # Constants matching shm_protocol.h
 SHM_MAGIC = 0x56464341
@@ -47,15 +47,10 @@ FLAG_FRAME_AVAILABLE = 1 << 1
 FLAG_CAPTURE_SUBRECT = 1 << 2
 FLAG_READER_BUSY = 1 << 3
 FLAG_SHUTDOWN = 1 << 4
-FLAG_COPY_PIXELS = 1 << 5
 
-# Encoder control field offsets (v3+)
-# encode_request at offset 624 (after damage_rects[32] @ 112..624)
-_OFF_ENCODE_REQUEST = 624
-_OFF_ENCODER_CONFIG = 628
+# Field offsets
 _OFF_BITSTREAM_SIZE = 632
 
-# v4 field offsets
 _OFF_VIDEO_RECT_X = 640
 _OFF_VIDEO_RECT_Y = 644
 _OFF_VIDEO_RECT_W = 648
@@ -147,21 +142,19 @@ class FrameInfo:
     present_count: int
     write_seq: int
     damage_rects: Optional[List[DamageRect]] = None
-    # v4 fields (set by frame_classifier.next_frame_v4)
     enc1_bitstream: Optional[bytes] = None
     enc2_bitstream: Optional[bytes] = None
     enc2_region: Optional[tuple] = None  # (mb_x, mb_y, mb_w, mb_h)
 
 
 class FrameCaptureReader:
-    """Reads frames from the Vulkan layer's shared memory region."""
+    """Reads frame metadata and bitstreams from the Vulkan layer's shared memory."""
 
     def __init__(self):
         self._fd: int = -1
         self._mm: Optional[mmap.mmap] = None
         self._last_seq: int = 0
         self._connected = False
-        self._has_damage_rects = False
 
     @property
     def connected(self) -> bool:
@@ -189,7 +182,6 @@ class FrameCaptureReader:
             hdr = self._read_header()
             if hdr[_F_MAGIC] == SHM_MAGIC and (hdr[_F_FLAGS] & FLAG_LAYER_READY):
                 self._connected = True
-                self._has_damage_rects = hdr[_F_VERSION] >= 2
                 # Clear SHUTDOWN flag in case a previous reader set it
                 self._clear_flags(FLAG_SHUTDOWN)
                 return True
@@ -207,97 +199,17 @@ class FrameCaptureReader:
         hdr = self._read_header()
         return hdr[_F_SKIP_COUNT]
 
-    def set_capture_rect(self, x: int, y: int, w: int, h: int):
-        """Tell the layer to capture a sub-rectangle next frame."""
-        if not self._connected:
-            return
-        struct.pack_into("<iiII", self._mm, 32, x, y, w, h)
-        self._or_flags(FLAG_CAPTURE_SUBRECT)
-
     def set_capture_full(self):
         """Tell the layer to capture the full frame."""
         if not self._connected:
             return
         self._clear_flags(FLAG_CAPTURE_SUBRECT)
 
-    def read_frame(self, timeout: float = 0.1) -> Optional[tuple]:
-        """
-        Read the next available frame.
-
-        Returns:
-            (numpy_array, FrameInfo) or None if no new frame within timeout.
-            numpy_array is shape (H, W, 4) dtype uint8 in BGRA order.
-        """
-        if not self._connected:
-            return None
-
-        start = time.monotonic()
-        while time.monotonic() - start < timeout:
-            hdr = self._read_header()
-            if hdr[_F_WRITE_SEQ] > self._last_seq:
-                break
-            time.sleep(0.0001)  # 100us poll
-        else:
-            return None
-
-        # Signal that we are reading
-        self._or_flags(FLAG_READER_BUSY)
-        self._clear_flags(FLAG_FRAME_AVAILABLE)
-
-        hdr = self._read_header()
-        w = hdr[_F_CAP_W]
-        h = hdr[_F_CAP_H]
-        stride = hdr[_F_CAP_STRIDE]
-
-        if w == 0 or h == 0:
-            self._clear_flags(FLAG_READER_BUSY)
-            return None
-
-        row_bytes = w * BYTES_PER_PIXEL
-
-        # Read pixel data — create a numpy view directly on the mmap
-        # and .copy() once, avoiding the intermediate bytes/bytearray.
-        if stride == row_bytes or stride == 0:
-            arr = np.ndarray(
-                (h, w, 4), dtype=np.uint8,
-                buffer=self._mm, offset=SHM_HEADER_SIZE,
-            ).copy()
-        else:
-            # Strided layout: use numpy strides to skip padding bytes
-            arr = np.ndarray(
-                (h, w, 4), dtype=np.uint8,
-                buffer=self._mm, offset=SHM_HEADER_SIZE,
-                strides=(stride, BYTES_PER_PIXEL, 1),
-            ).copy()
-
-        damage = self._read_damage_rects()
-
-        info = FrameInfo(
-            width=w, height=h, stride=stride,
-            x=hdr[_F_CAP_X], y=hdr[_F_CAP_Y],
-            format=hdr[_F_FRAME_FMT],
-            timestamp_ns=hdr[_F_TIMESTAMP],
-            present_count=hdr[_F_PRESENT],
-            write_seq=hdr[_F_WRITE_SEQ],
-            damage_rects=damage,
-        )
-
-        self._last_seq = hdr[_F_WRITE_SEQ]
-
-        # Update read_seq
-        struct.pack_into("<Q", self._mm, 80, self._last_seq)
-
-        self._clear_flags(FLAG_READER_BUSY)
-
-        return arr, info
-
-    def _read_damage_rects(self) -> Optional[list]:
-        """Read damage rects from the SHM header (v2+)."""
-        if not self._has_damage_rects:
-            return None
+    def _read_damage_rects(self) -> list:
+        """Read damage rects from the SHM header."""
         count = struct.unpack_from("<I", self._mm, 104)[0]
         if count == DAMAGE_RECT_NOT_PRESENT:
-            return None
+            return []
         if count == 0:
             return []
         n = min(count, MAX_DAMAGE_RECTS)
@@ -308,34 +220,7 @@ class FrameCaptureReader:
             rects.append(DamageRect(x=x, y=y, width=w, height=h))
         return rects
 
-    # ---- Encoder control (v3+) ----
-
-    def set_encode_request(self, request: int):
-        """Set encode_request for the next frame (0=none, 1=encode, 2=force_idr)."""
-        if self._mm:
-            struct.pack_into("<I", self._mm, _OFF_ENCODE_REQUEST, request)
-
-    def set_encoder_config(self, qp: int):
-        """Set encoder QP config (low 8 bits)."""
-        if self._mm:
-            struct.pack_into("<I", self._mm, _OFF_ENCODER_CONFIG, qp & 0xFF)
-
-    def get_bitstream_size(self) -> int:
-        """Read bitstream_size from SHM header (0 if no bitstream)."""
-        if not self._mm:
-            return 0
-        return struct.unpack_from("<I", self._mm, _OFF_BITSTREAM_SIZE)[0]
-
-    def read_bitstream(self) -> Optional[bytes]:
-        """Read encoded bitstream from SHM bitstream region, or None."""
-        if not self._mm:
-            return None
-        bs_size = struct.unpack_from("<I", self._mm, _OFF_BITSTREAM_SIZE)[0]
-        if bs_size == 0:
-            return None
-        return bytes(self._mm[SHM_BITSTREAM_OFFSET:SHM_BITSTREAM_OFFSET + bs_size])
-
-    # ---- v4: Video state writers (Python → layer) ----
+    # ---- Video state writers (Python → layer) ----
 
     def set_video_rect(self, x: int, y: int, w: int, h: int):
         """Write video rect in device pixels to SHM."""
@@ -352,7 +237,7 @@ class FrameCaptureReader:
         if self._mm:
             struct.pack_into("<I", self._mm, _OFF_ANY_VIDEO_PLAYING, 1 if playing else 0)
 
-    # ---- v4: Classification + encoder2 readers (layer → Python) ----
+    # ---- Classification + bitstream readers (layer → Python) ----
 
     def get_frame_category(self) -> int:
         """Read frame_category from SHM header."""
@@ -386,8 +271,8 @@ class FrameCaptureReader:
 
     def read_frame_v4(self, timeout: float = 0.1):
         """
-        Read next frame in v4 mode: header + damage_rects + category + bitstreams.
-        NO pixel copy.
+        Read next frame: header + damage_rects + category + bitstreams.
+        No pixel copy.
 
         Returns:
             (FrameInfo, category, enc1_bs, enc2_bs, enc2_region) or None if no new frame.

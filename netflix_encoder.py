@@ -646,7 +646,7 @@ def classify_phase(classifier, duration, label, handler=None):
         classifier: FrameClassifier instance
         duration: How long to run this phase (seconds)
         label: Human-readable phase name
-        handler: Optional FrameHandler to receive frame events
+        handler: Optional BaseFrameHandler to receive frame events
     """
     if handler is not None:
         handler.on_phase_start(label)
