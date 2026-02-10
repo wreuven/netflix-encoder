@@ -1,0 +1,302 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="gpuGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="headerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0f3460"/>
+      <stop offset="100%" stop-color="#533483"/>
+    </linearGradient>
+    <linearGradient id="vkGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#b71c1c"/>
+      <stop offset="100%" stop-color="#880e4f"/>
+    </linearGradient>
+    <linearGradient id="cudaGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#76b900"/>
+      <stop offset="100%" stop-color="#4a7a00"/>
+    </linearGradient>
+    <linearGradient id="shmGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0277bd"/>
+      <stop offset="100%" stop-color="#01579b"/>
+    </linearGradient>
+    <linearGradient id="fdGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b71c1c"/>
+      <stop offset="50%" stop-color="#f57f17"/>
+      <stop offset="100%" stop-color="#76b900"/>
+    </linearGradient>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="108%">
+      <feDropShadow dx="2" dy="3" stdDeviation="4" flood-opacity="0.35"/>
+    </filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrowWhite" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ccc"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#76b900"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef5350"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ffa726"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4dd0e1"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="#0d1117"/>
+
+  <!-- Header -->
+  <rect x="0" y="0" width="1920" height="80" fill="url(#headerGrad)" opacity="0.9"/>
+  <text x="960" y="50" text-anchor="middle" fill="#fff" font-size="32" font-weight="700" letter-spacing="1">Zero-Copy NVENC — Vulkan-CUDA Interop Architecture</text>
+
+  <!-- GPU domain box -->
+  <rect x="40" y="100" width="1840" height="640" rx="16" fill="url(#gpuGrad)" stroke="#333" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="70" y="133" fill="#666" font-size="16" font-weight="600" letter-spacing="2">GPU  MEMORY</text>
+  <rect x="40" y="100" width="1840" height="4" rx="2" fill="#76b900" opacity="0.6"/>
+
+  <!-- ============================================ -->
+  <!-- COLUMN 1: Swapchain + SHM classify           -->
+  <!-- ============================================ -->
+
+  <!-- Swapchain Image -->
+  <rect x="80" y="180" width="200" height="140" rx="10" fill="#1e3a5f" stroke="#4fc3f7" stroke-width="2" filter="url(#shadow)"/>
+  <text x="180" y="225" text-anchor="middle" fill="#4fc3f7" font-size="15" font-weight="700">Swapchain</text>
+  <text x="180" y="248" text-anchor="middle" fill="#4fc3f7" font-size="15" font-weight="700">Image</text>
+  <!-- Mini frame preview -->
+  <rect x="115" y="262" width="130" height="44" rx="4" fill="#263238" stroke="#546e7a" stroke-width="1"/>
+  <rect x="119" y="266" width="122" height="10" fill="#37474f"/>
+  <rect x="119" y="280" width="50" height="22" rx="2" fill="#455a64"/>
+  <text x="144" y="295" text-anchor="middle" fill="#78909c" font-size="9">video</text>
+  <text x="180" y="295" text-anchor="middle" fill="#37474f" font-size="9">UI</text>
+
+  <!-- classify_frame() decision diamond -->
+  <g transform="translate(410, 230)">
+    <polygon points="100,0 200,65 100,130 0,65" fill="#1a1a2e" stroke="#ffa726" stroke-width="2.5" filter="url(#shadow)"/>
+    <text x="100" y="55" text-anchor="middle" fill="#ffa726" font-size="14" font-weight="700">classify_frame()</text>
+    <text x="100" y="75" text-anchor="middle" fill="#999" font-size="11">damage rects</text>
+    <text x="100" y="90" text-anchor="middle" fill="#999" font-size="11">+ video state</text>
+  </g>
+
+  <!-- Arrow: Swapchain → classify (NOT pixel data) -->
+  <line x1="280" y1="250" x2="408" y2="275" stroke="#555" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowWhite)"/>
+  <text x="340" y="248" text-anchor="middle" fill="#777" font-size="11" font-style="italic">no pixels</text>
+
+  <!-- SHM metadata input to classify -->
+  <rect x="370" y="420" width="180" height="70" rx="8" fill="#1b2838" stroke="#4dd0e1" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="460" y="448" text-anchor="middle" fill="#4dd0e1" font-size="12" font-weight="600">SHM Metadata</text>
+  <text x="460" y="466" text-anchor="middle" fill="#78909c" font-size="10">damage_rects, video_rect</text>
+  <text x="460" y="480" text-anchor="middle" fill="#78909c" font-size="10">any_video_playing</text>
+  <line x1="460" y1="420" x2="500" y2="362" stroke="#4dd0e1" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowCyan)"/>
+
+  <!-- ============================================ -->
+  <!-- THREE BRANCHES                                -->
+  <!-- ============================================ -->
+
+  <!-- Branch labels on arrows from diamond -->
+
+  <!-- UNCHANGED path (top) — exits upward then right -->
+  <path d="M 510,230 L 510,170 L 700,170" fill="none" stroke="#4caf50" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="535" y="148" width="120" height="24" rx="12" fill="#1b5e20" stroke="#4caf50" stroke-width="1"/>
+  <text x="595" y="165" text-anchor="middle" fill="#81c784" font-size="12" font-weight="700">UNCHANGED</text>
+
+  <!-- UNCHANGED destination: nothing! -->
+  <rect x="706" y="148" width="220" height="55" rx="10" fill="#1a2e1a" stroke="#4caf50" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="816" y="172" text-anchor="middle" fill="#4caf50" font-size="16" font-weight="700">Zero GPU work</text>
+  <text x="816" y="192" text-anchor="middle" fill="#689f38" font-size="12">no copy, no encode (~22%)</text>
+
+  <!-- CHANGED path (middle) -->
+  <line x1="610" y1="295" x2="700" y2="295" stroke="#ef5350" stroke-width="2.5" marker-end="url(#arrowRed)"/>
+  <rect x="625" y="275" width="90" height="22" rx="11" fill="#4a1515" stroke="#ef5350" stroke-width="1"/>
+  <text x="670" y="291" text-anchor="middle" fill="#ef9a9a" font-size="11" font-weight="700">CHANGED</text>
+
+  <!-- VIDEO_ONLY path (bottom) -->
+  <path d="M 510,360 L 510,450 L 700,450" fill="none" stroke="#ffa726" stroke-width="2.5" marker-end="url(#arrowOrange)"/>
+  <rect x="540" y="432" width="115" height="22" rx="11" fill="#4a3000" stroke="#ffa726" stroke-width="1"/>
+  <text x="597" y="448" text-anchor="middle" fill="#ffcc80" font-size="11" font-weight="700">VIDEO_ONLY</text>
+
+  <!-- ============================================ -->
+  <!-- COLUMN 2: GPU Copy operations                 -->
+  <!-- ============================================ -->
+
+  <!-- Enc1: full-frame GPU copy -->
+  <rect x="706" y="252" width="220" height="85" rx="10" fill="#1e1e2e" stroke="#ef5350" stroke-width="2" filter="url(#shadow)"/>
+  <text x="816" y="277" text-anchor="middle" fill="#ef9a9a" font-size="13" font-weight="700">vkCmdCopyImageToBuffer</text>
+  <text x="816" y="298" text-anchor="middle" fill="#999" font-size="11">full frame → enc1_buf</text>
+  <!-- Mini full frame -->
+  <rect x="760" y="306" width="110" height="24" rx="3" fill="#263238" stroke="#ef5350" stroke-width="1"/>
+  <rect x="763" y="309" width="104" height="6" fill="#37474f"/>
+  <rect x="763" y="317" width="40" height="10" rx="1" fill="#455a64"/>
+  <text x="790" y="325" text-anchor="middle" fill="#78909c" font-size="7">vid</text>
+
+  <!-- Enc2: region GPU copy -->
+  <rect x="706" y="410" width="220" height="85" rx="10" fill="#1e1e2e" stroke="#ffa726" stroke-width="2" filter="url(#shadow)"/>
+  <text x="816" y="435" text-anchor="middle" fill="#ffcc80" font-size="13" font-weight="700">vkCmdCopyImageToBuffer</text>
+  <text x="816" y="456" text-anchor="middle" fill="#999" font-size="11">region → enc2_buf</text>
+  <text x="816" y="472" text-anchor="middle" fill="#777" font-size="10" font-style="italic">imageOffset crops on GPU</text>
+  <!-- Mini region frame -->
+  <rect x="778" y="478" width="75" height="14" rx="2" fill="#263238" stroke="#ffa726" stroke-width="1"/>
+  <rect x="781" y="481" width="28" height="8" rx="1" fill="#5d4037"/>
+  <text x="795" y="489" text-anchor="middle" fill="#a1887f" font-size="7">region</text>
+
+  <!-- Arrows from copy to VkBuffers -->
+  <line x1="926" y1="295" x2="990" y2="295" stroke="#ef5350" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <line x1="926" y1="452" x2="990" y2="452" stroke="#ffa726" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+  <!-- ============================================ -->
+  <!-- COLUMN 3: VkBuffer (device-local)             -->
+  <!-- ============================================ -->
+
+  <!-- Enc1 VkBuffer -->
+  <rect x="996" y="252" width="190" height="85" rx="10" fill="#1e1e2e" stroke="url(#vkGrad)" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1091" y="277" text-anchor="middle" fill="#ef5350" font-size="14" font-weight="700">VkBuffer</text>
+  <text x="1091" y="296" text-anchor="middle" fill="#ef9a9a" font-size="11">enc1_buf</text>
+  <text x="1091" y="312" text-anchor="middle" fill="#888" font-size="10">DEVICE_LOCAL</text>
+  <text x="1091" y="328" text-anchor="middle" fill="#777" font-size="9">+ EXPORT (OPAQUE_FD)</text>
+
+  <!-- Enc2 VkBuffer -->
+  <rect x="996" y="410" width="190" height="85" rx="10" fill="#1e1e2e" stroke="url(#vkGrad)" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1091" y="435" text-anchor="middle" fill="#ef5350" font-size="14" font-weight="700">VkBuffer</text>
+  <text x="1091" y="454" text-anchor="middle" fill="#ef9a9a" font-size="11">enc2_buf</text>
+  <text x="1091" y="470" text-anchor="middle" fill="#888" font-size="10">DEVICE_LOCAL</text>
+  <text x="1091" y="486" text-anchor="middle" fill="#777" font-size="9">+ EXPORT (OPAQUE_FD)</text>
+
+  <!-- ============================================ -->
+  <!-- FD EXPORT BRIDGE                              -->
+  <!-- ============================================ -->
+
+  <!-- fd bridge box (shared between both) -->
+  <rect x="1210" y="320" width="120" height="108" rx="8" fill="#1a1a1a" stroke="url(#fdGrad)" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1270" y="350" text-anchor="middle" fill="#f57f17" font-size="11" font-weight="700">POSIX fd</text>
+  <text x="1270" y="370" text-anchor="middle" fill="#aaa" font-size="10">vkGetMemoryFdKHR</text>
+  <text x="1270" y="390" text-anchor="middle" fill="#aaa" font-size="10">↓</text>
+  <text x="1270" y="408" text-anchor="middle" fill="#aaa" font-size="10">cuImportExternal</text>
+  <text x="1270" y="422" text-anchor="middle" fill="#aaa" font-size="10">Memory</text>
+
+  <!-- Arrows into fd bridge -->
+  <line x1="1186" y1="295" x2="1208" y2="345" stroke="#ef5350" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowRed)"/>
+  <line x1="1186" y1="452" x2="1208" y2="405" stroke="#ffa726" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowOrange)"/>
+
+  <!-- Arrows from fd bridge to CUDA -->
+  <line x1="1330" y1="355" x2="1380" y2="295" stroke="#76b900" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowGreen)"/>
+  <line x1="1330" y1="400" x2="1380" y2="452" stroke="#76b900" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowGreen)"/>
+
+  <!-- ============================================ -->
+  <!-- COLUMN 4: CUDA dev_ptr (same physical mem)    -->
+  <!-- ============================================ -->
+
+  <!-- Enc1 CUDA ptr -->
+  <rect x="1386" y="252" width="170" height="85" rx="10" fill="#1e2e1e" stroke="url(#cudaGrad)" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1471" y="277" text-anchor="middle" fill="#76b900" font-size="14" font-weight="700">CUDA dev_ptr</text>
+  <text x="1471" y="296" text-anchor="middle" fill="#aed581" font-size="11">encoder 1</text>
+  <text x="1471" y="312" text-anchor="middle" fill="#777" font-size="10">same physical memory</text>
+  <text x="1471" y="328" text-anchor="middle" fill="#689f38" font-size="10" font-weight="600">no cuMemcpyHtoD</text>
+
+  <!-- Enc2 CUDA ptr -->
+  <rect x="1386" y="410" width="170" height="85" rx="10" fill="#1e2e1e" stroke="url(#cudaGrad)" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1471" y="435" text-anchor="middle" fill="#76b900" font-size="14" font-weight="700">CUDA dev_ptr</text>
+  <text x="1471" y="454" text-anchor="middle" fill="#aed581" font-size="11">encoder 2</text>
+  <text x="1471" y="470" text-anchor="middle" fill="#777" font-size="10">same physical memory</text>
+  <text x="1471" y="486" text-anchor="middle" fill="#689f38" font-size="10" font-weight="600">no cuMemcpyHtoD</text>
+
+  <!-- Arrows to NVENC -->
+  <line x1="1556" y1="295" x2="1620" y2="295" stroke="#76b900" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <line x1="1556" y1="452" x2="1620" y2="452" stroke="#76b900" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- ============================================ -->
+  <!-- COLUMN 5: NVENC                               -->
+  <!-- ============================================ -->
+
+  <!-- NVENC encoder 1 -->
+  <rect x="1626" y="252" width="170" height="85" rx="10" fill="#1a2e1a" stroke="#76b900" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="1711" y="280" text-anchor="middle" fill="#76b900" font-size="16" font-weight="800">NVENC</text>
+  <text x="1711" y="300" text-anchor="middle" fill="#aed581" font-size="12">Encoder 1</text>
+  <text x="1711" y="318" text-anchor="middle" fill="#689f38" font-size="10">full-frame, LTR 0</text>
+  <text x="1711" y="332" text-anchor="middle" fill="#555" font-size="9">deblock ON, slice_mode=3</text>
+
+  <!-- NVENC encoder 2 -->
+  <rect x="1626" y="410" width="170" height="85" rx="10" fill="#1a2e1a" stroke="#76b900" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="1711" y="438" text-anchor="middle" fill="#76b900" font-size="16" font-weight="800">NVENC</text>
+  <text x="1711" y="458" text-anchor="middle" fill="#aed581" font-size="12">Encoder 2</text>
+  <text x="1711" y="476" text-anchor="middle" fill="#689f38" font-size="10">region, per-row slices</text>
+  <text x="1711" y="490" text-anchor="middle" fill="#555" font-size="9">deblock OFF, slice_mode=2</text>
+
+  <!-- ============================================ -->
+  <!-- CPU / SHM domain (below GPU box)              -->
+  <!-- ============================================ -->
+
+  <rect x="40" y="760" width="1840" height="280" rx="16" fill="#111822" stroke="#333" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="70" y="793" fill="#666" font-size="16" font-weight="600" letter-spacing="2">CPU  /  SHARED MEMORY</text>
+  <rect x="40" y="760" width="1840" height="4" rx="2" fill="#0277bd" opacity="0.6"/>
+
+  <!-- SHM bitstream regions -->
+  <rect x="100" y="820" width="340" height="80" rx="10" fill="#0d2137" stroke="#0277bd" stroke-width="2" filter="url(#shadow)"/>
+  <text x="270" y="848" text-anchor="middle" fill="#4fc3f7" font-size="14" font-weight="700">SHM Bitstream Region</text>
+  <text x="270" y="868" text-anchor="middle" fill="#78909c" font-size="11">/dev/shm/chrome_frame_capture</text>
+  <!-- Two sub-regions -->
+  <rect x="115" y="878" width="145" height="16" rx="3" fill="#1a3a5a" stroke="#ef5350" stroke-width="1"/>
+  <text x="187" y="891" text-anchor="middle" fill="#ef9a9a" font-size="9">enc1: 1MB @ offset</text>
+  <rect x="270" y="878" width="145" height="16" rx="3" fill="#1a3a5a" stroke="#ffa726" stroke-width="1"/>
+  <text x="342" y="891" text-anchor="middle" fill="#ffcc80" font-size="9">enc2: 1MB @ +1MB</text>
+
+  <!-- Arrows: NVENC → SHM (bitstream output leaves GPU) -->
+  <path d="M 1711,337 L 1711,560 Q 1711,590 1681,590 L 460,590 Q 430,590 430,620 L 430,680 Q 430,700 410,715 L 270,760 L 270,818" fill="none" stroke="#4fc3f7" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrowCyan)"/>
+  <text x="1600" y="575" fill="#4dd0e1" font-size="11" font-weight="600">H.264 bitstream</text>
+
+  <path d="M 1711,495 L 1711,560" fill="none" stroke="#4fc3f7" stroke-width="2" stroke-dasharray="6,3"/>
+
+  <!-- Python process -->
+  <rect x="540" y="820" width="300" height="80" rx="10" fill="#1a1a2e" stroke="#7c4dff" stroke-width="2" filter="url(#shadow)"/>
+  <text x="690" y="848" text-anchor="middle" fill="#b388ff" font-size="14" font-weight="700">Python (netflix_encoder.py)</text>
+  <text x="690" y="868" text-anchor="middle" fill="#888" font-size="11">NAL post-processing only</text>
+  <text x="690" y="886" text-anchor="middle" fill="#777" font-size="10">LTR0 rewrite, splice stitching</text>
+
+  <!-- Arrow: SHM → Python -->
+  <line x1="440" y1="860" x2="538" y2="860" stroke="#7c4dff" stroke-width="2" marker-end="url(#arrowWhite)"/>
+  <text x="489" y="852" text-anchor="middle" fill="#888" font-size="10">read</text>
+
+  <!-- MKV output -->
+  <rect x="940" y="820" width="200" height="80" rx="10" fill="#1a2e1a" stroke="#66bb6a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1040" y="850" text-anchor="middle" fill="#a5d6a7" font-size="14" font-weight="700">VFR MKV</text>
+  <text x="1040" y="870" text-anchor="middle" fill="#689f38" font-size="11">live_spliced.mkv</text>
+  <text x="1040" y="888" text-anchor="middle" fill="#555" font-size="10">PyAV frame-by-frame</text>
+
+  <!-- Arrow: Python → MKV -->
+  <line x1="840" y1="860" x2="938" y2="860" stroke="#66bb6a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- ============================================ -->
+  <!-- BOTTOM: Key insight callout                   -->
+  <!-- ============================================ -->
+
+  <rect x="1220" y="810" width="620" height="100" rx="12" fill="#111" stroke="#f57f17" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="1530" y="845" text-anchor="middle" fill="#f57f17" font-size="14" font-weight="700">KEY</text>
+  <text x="1245" y="872" fill="#999" font-size="12">GPU → GPU buffer (device-local) → NVENC — zero CPU touch</text>
+  <text x="1245" y="898" fill="#4caf50" font-size="12">UNCHANGED frames skip all GPU work (classify reads SHM metadata only)</text>
+
+  <!-- ============================================ -->
+  <!-- "Same physical memory" annotation             -->
+  <!-- ============================================ -->
+
+  <rect x="1200" y="530" width="440" height="50" rx="8" fill="none" stroke="#f57f17" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="1420" y="555" text-anchor="middle" fill="#f57f17" font-size="13" font-weight="600">VkBuffer + CUDA dev_ptr = same physical GPU memory</text>
+  <text x="1420" y="572" text-anchor="middle" fill="#999" font-size="11">VK_KHR_external_memory_fd exports fd → CUDA imports it</text>
+
+  <!-- Dashed bracket connecting VkBuffers and CUDA ptrs -->
+  <path d="M 1270,505 L 1270,528" fill="none" stroke="#f57f17" stroke-width="1" stroke-dasharray="3,2"/>
+  <path d="M 1471,505 L 1471,528" fill="none" stroke="#f57f17" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- ============================================ -->
+  <!-- Swapchain → GPU copy: "stays on GPU" label    -->
+  <!-- ============================================ -->
+
+  <rect x="80" y="530" width="560" height="42" rx="8" fill="#111" stroke="#4caf50" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="360" y="550" text-anchor="middle" fill="#81c784" font-size="12" font-weight="600">vkCmdCopyImageToBuffer: swapchain → device-local buffer</text>
+  <text x="360" y="566" text-anchor="middle" fill="#689f38" font-size="11">GPU-to-GPU transfer — pixels never leave VRAM</text>
+
+</svg>
