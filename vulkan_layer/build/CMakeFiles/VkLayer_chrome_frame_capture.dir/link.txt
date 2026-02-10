@@ -1,1 +1,0 @@
-/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libVkLayer_chrome_frame_capture.so -o libVkLayer_chrome_frame_capture.so CMakeFiles/VkLayer_chrome_frame_capture.dir/frame_capture_layer.c.o CMakeFiles/VkLayer_chrome_frame_capture.dir/nvenc_encode.c.o  -lrt -lpthread -ldl 
