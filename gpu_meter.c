@@ -37,6 +37,8 @@ static nvmlReturn_t (*nvmlDeviceGetCount_v2)(unsigned int *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetHandleByIndex_v2)(unsigned int, nvmlDevice_t *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetUtilizationRates)(nvmlDevice_t, unsigned int *, unsigned int *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetMemoryInfo)(nvmlDevice_t, void *) = NULL;
+static nvmlReturn_t (*nvmlDeviceGetEncoderUtilization)(nvmlDevice_t, unsigned int *, unsigned int *) = NULL;
+static nvmlReturn_t (*nvmlDeviceGetDecoderUtilization)(nvmlDevice_t, unsigned int *, unsigned int *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetPowerUsage)(nvmlDevice_t, unsigned int *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetTemperature)(nvmlDevice_t, int, unsigned int *) = NULL;
 static nvmlReturn_t (*nvmlDeviceGetName)(nvmlDevice_t, char *, unsigned int) = NULL;
@@ -45,7 +47,10 @@ static nvmlReturn_t (*nvmlDeviceGetName)(nvmlDevice_t, char *, unsigned int) = N
 typedef struct {
     unsigned int gpu_util;
     unsigned int mem_util;
+    unsigned int encoder_util;
+    unsigned int decoder_util;
     unsigned int power_mw;
+    int power_available;  /* 1 = valid, 0 = N/A */
     unsigned int temp_c;
     unsigned long mem_used_mb;
     unsigned long mem_total_mb;
@@ -77,6 +82,8 @@ static int nvml_load(void) {
     nvmlDeviceGetHandleByIndex_v2 = dlsym(handle, "nvmlDeviceGetHandleByIndex_v2");
     nvmlDeviceGetUtilizationRates = dlsym(handle, "nvmlDeviceGetUtilizationRates");
     nvmlDeviceGetMemoryInfo = dlsym(handle, "nvmlDeviceGetMemoryInfo");
+    nvmlDeviceGetEncoderUtilization = dlsym(handle, "nvmlDeviceGetEncoderUtilization");
+    nvmlDeviceGetDecoderUtilization = dlsym(handle, "nvmlDeviceGetDecoderUtilization");
     nvmlDeviceGetPowerUsage = dlsym(handle, "nvmlDeviceGetPowerUsage");
     nvmlDeviceGetTemperature = dlsym(handle, "nvmlDeviceGetTemperature");
     nvmlDeviceGetName = dlsym(handle, "nvmlDeviceGetName");
@@ -101,8 +108,19 @@ static int get_metrics(nvmlDevice_t device, gpu_metrics_t *metrics) {
         metrics->mem_util = 0;
     }
 
-    if (nvmlDeviceGetPowerUsage(device, &metrics->power_mw) != NVML_SUCCESS) {
-        metrics->power_mw = 0;
+    metrics->encoder_util = 0;
+    metrics->decoder_util = 0;
+    if (nvmlDeviceGetEncoderUtilization && nvmlDeviceGetEncoderUtilization(device, &metrics->encoder_util, NULL) != NVML_SUCCESS) {
+        metrics->encoder_util = 0;
+    }
+    if (nvmlDeviceGetDecoderUtilization && nvmlDeviceGetDecoderUtilization(device, &metrics->decoder_util, NULL) != NVML_SUCCESS) {
+        metrics->decoder_util = 0;
+    }
+
+    metrics->power_available = 0;
+    metrics->power_mw = 0;
+    if (nvmlDeviceGetPowerUsage(device, &metrics->power_mw) == NVML_SUCCESS) {
+        metrics->power_available = 1;
     }
 
     if (nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &metrics->temp_c) != NVML_SUCCESS) {
@@ -136,6 +154,10 @@ static void* monitor_thread_func(void *arg) {
             state->peak.gpu_util = state->current.gpu_util;
         if (state->current.mem_util > state->peak.mem_util)
             state->peak.mem_util = state->current.mem_util;
+        if (state->current.encoder_util > state->peak.encoder_util)
+            state->peak.encoder_util = state->current.encoder_util;
+        if (state->current.decoder_util > state->peak.decoder_util)
+            state->peak.decoder_util = state->current.decoder_util;
         if (state->current.power_mw > state->peak.power_mw)
             state->peak.power_mw = state->current.power_mw;
         if (state->current.temp_c > state->peak.temp_c)
@@ -143,14 +165,17 @@ static void* monitor_thread_func(void *arg) {
 
         if (state->period_us > 0) {
             /* Print current metrics */
-            printf("[%.2fs] GPU: %3u%% | Mem: %3u%% (%lu/%lu MB) | Power: %u W | Temp: %u°C\n",
+            printf("[%.2fs] GPU: %3u%% | Mem: %3u%% | Enc: %3u%% | Dec: %3u%% | Temp: %u°C",
                    (double)state->current.timestamp_us / 1000000.0,
                    state->current.gpu_util,
                    state->current.mem_util,
-                   state->current.mem_used_mb,
-                   state->current.mem_total_mb,
-                   state->current.power_mw / 1000,
+                   state->current.encoder_util,
+                   state->current.decoder_util,
                    state->current.temp_c);
+            if (state->current.power_available) {
+                printf(" | Power: %u W", state->current.power_mw / 1000);
+            }
+            printf("\n");
             fflush(stdout);
 
             sleep_time.tv_sec = state->period_us / 1000000;
@@ -182,10 +207,18 @@ static void print_summary(monitor_state_t *state, gpu_metrics_t *baseline, doubl
            state->current.mem_util, state->peak.mem_util, baseline->mem_util);
     printf("                     %lu / %lu MB used (baseline: %lu MB)\n",
            state->current.mem_used_mb, state->current.mem_total_mb, baseline->mem_used_mb);
-    printf("  Power:             %u W (peak: %u W)\n",
-           state->current.power_mw / 1000, state->peak.power_mw / 1000);
+    printf("  NVENC Utilization: %3u%% (peak: %u%%, baseline: %u%%)\n",
+           state->current.encoder_util, state->peak.encoder_util, baseline->encoder_util);
+    printf("  NVDEC Utilization: %3u%% (peak: %u%%, baseline: %u%%)\n",
+           state->current.decoder_util, state->peak.decoder_util, baseline->decoder_util);
     printf("  Temperature:       %u°C (peak: %u°C, baseline: %u°C)\n",
            state->current.temp_c, state->peak.temp_c, baseline->temp_c);
+    if (state->peak.power_available || baseline->power_available) {
+        printf("  Power:             %u W (peak: %u W)\n",
+               state->current.power_mw / 1000, state->peak.power_mw / 1000);
+    } else {
+        printf("  Power:             N/A (not supported on this GPU)\n");
+    }
     printf("================================================\n");
 }
 
@@ -245,10 +278,15 @@ int main(int argc, char *argv[]) {
     /* Get baseline reading */
     gpu_metrics_t baseline;
     get_metrics(device, &baseline);
-    printf("Baseline: GPU %3u%% | Mem %3u%% (%lu/%lu MB) | Temp %u°C\n",
+    printf("Baseline: GPU %3u%% | Mem %3u%% | Enc %3u%% | Dec %3u%% | Temp %u°C | ",
            baseline.gpu_util, baseline.mem_util,
-           baseline.mem_used_mb, baseline.mem_total_mb,
+           baseline.encoder_util, baseline.decoder_util,
            baseline.temp_c);
+    if (baseline.power_available) {
+        printf("Power %u W\n", baseline.power_mw / 1000);
+    } else {
+        printf("Power N/A\n");
+    }
 
     if (period_sec > 0) {
         printf("Reporting every %u seconds...\n\n", period_sec);
