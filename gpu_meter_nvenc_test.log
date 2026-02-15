@@ -1,0 +1,230 @@
+GPU: NVIDIA GeForce RTX 3050
+Baseline: GPU  35% | Mem  24% | Enc   0% | Dec   0% | Temp 44°C | Power N/A
+Reporting every 15 seconds...
+
+[289651.14s] GPU:  35% | Mem:  24% | Enc:   0% | Dec:   0% | Temp: 44°C
+[289666.16s] GPU:  21% | Mem:  13% | Enc:   0% | Dec:   0% | Temp: 44°C
+[289681.19s] GPU:  18% | Mem:  11% | Enc:   0% | Dec:   0% | Temp: 44°C
+[289696.22s] GPU:  35% | Mem:  22% | Enc:   0% | Dec:   0% | Temp: 44°C
+[289711.26s] GPU:  33% | Mem:  22% | Enc:   0% | Dec:   0% | Temp: 45°C
+============================================================
+NETFLIX ENCODER — LAYER-SIDE DUAL ENCODER
+============================================================
+
+[setup] Ensuring Xdummy is running on :99...
+  Xdummy already running on :99
+[setup] Launching Chrome on :99 with capture layer...
+  VK_LAYER_PATH=/home/wachtfogel/Projects/netflix_encoder/vulkan_layer
+  VK_INSTANCE_LAYERS=VK_LAYER_CHROME_frame_capture
+  CHROME_FRAME_CAPTURE=1
+  Chrome started, checking login status...
+  Already logged in
+[setup] Connecting to Chrome...
+  Window: 1279x719, DPR: 1.0
+  Injected off-screen animation pauser
+  Classifier started (damage rects via SHM)
+
+[enc] v4: Layer-side classification + dual encoder
+[enc] Frame: 1279x719, Encoding: 1280x720
+[enc] MBs: 80x45
+[enc] Chrome height: 139
+[enc] No Python-side encoding — layer handles both encoders
+
+[phase 1] Hero video at top of page...
+[enc] Frame 100 (25.1 fps) - enc1: 97, enc2: 0, stitched: 3
+  Phase 1/10: Hero video (top of page)
+    127 frames, 5.0s, 25 fps, 24.5 vfps, 2 dropped
+    UNCHANGED   :    4 (  3.1%) |#.................................................|
+    VIDEO_ONLY  :    0 (  0.0%) |..................................................|
+    CHANGED     :  123 ( 96.9%) |################################################..|
+
+[phase 2] Scrolling past hero...
+  Phase 2/10: Scroll past hero
+    50 frames, 2.0s, 25 fps, 21.8 vfps
+    UNCHANGED   :    6 ( 12.0%) |######............................................|
+    VIDEO_ONLY  :    0 (  0.0%) |..................................................|
+    CHANGED     :   44 ( 88.0%) |############################################......|
+
+[phase 3] Static baseline...
+[enc] Frame 200 (21.7 fps) - enc1: 167, enc2: 0, stitched: 33
+  Phase 3/10: Static baseline (no hover)
+    99 frames, 5.0s, 20 fps, 0.0 vfps
+    UNCHANGED   :   99 (100.0%) |##################################################|
+    VIDEO_ONLY  :    0 (  0.0%) |..................................................|
+    CHANGED     :    0 (  0.0%) |..................................................|
+
+[phase 4] Scrolling down...
+[enc] Frame 300 (21.4 fps) - enc1: 185, enc2: 0, stitched: 115
+  Phase 4/10: Smooth scroll
+    71 frames, 3.0s, 24 fps, 15.3 vfps
+    UNCHANGED   :   25 ( 35.2%) |#################.................................|
+    VIDEO_ONLY  :    0 (  0.0%) |..................................................|
+    CHANGED     :   46 ( 64.8%) |################################..................|
+
+[phase 5] Triggering popup preview...
+[enc] Entering video overlay mode at frame 373
+[enc] Frame 400 (21.2 fps) - enc1: 229, enc2: 25, stitched: 168
+[enc] Exiting video overlay mode at frame 462
+[enc] Entering video overlay mode at frame 464
+[enc] Exiting video overlay mode at frame 470
+[enc] Entering video overlay mode at frame 471
+[enc] Frame 500 (21.9 fps) - enc1: 232, enc2: 115, stitched: 258
+  Popup: (461,81) 341x348
+  Video: (461,81) 341x192
+  Phase 5/10: Popup opening + video start
+    196 frames, 8.0s, 24 fps, 21.8 vfps, 6 dropped
+    UNCHANGED   :   21 ( 10.7%) |#####.............................................|
+    VIDEO_ONLY  :  156 ( 79.6%) |#######################################...........|
+    CHANGED     :   19 (  9.7%) |####..............................................|
+
+[phase 6] Steady video playback...
+[enc] Frame 600 (22.3 fps) - enc1: 232, enc2: 211, stitched: 354
+[enc] Exiting video overlay mode at frame 619
+[enc] Entering video overlay mode at frame 620
+  Phase 6/10: Steady video playback
+    125 frames, 5.0s, 25 fps, 24.3 vfps
+    UNCHANGED   :    3 (  2.4%) |#.................................................|
+    VIDEO_ONLY  :  121 ( 96.8%) |################################################..|
+    CHANGED     :    1 (  0.8%) |..................................................|
+
+[phase 7] Mouse wiggle over popup...
+[enc] Exiting video overlay mode at frame 671
+[enc] Entering video overlay mode at frame 673
+[enc] Exiting video overlay mode at frame 679
+[enc] Entering video overlay mode at frame 680
+[enc] Frame 700 (22.7 fps) - enc1: 236, enc2: 305, stitched: 448
+  Phase 7/10: Mouse wiggle over popup
+    76 frames, 3.0s, 25 fps, 24.9 vfps
+    UNCHANGED   :    1 (  1.3%) |..................................................|
+    VIDEO_ONLY  :   72 ( 94.7%) |###############################################...|
+    CHANGED     :    3 (  3.9%) |#.................................................|
+
+[phase 8] Dismiss popup + scroll to new area...
+[enc] Exiting video overlay mode at frame 746
+[enc] Frame 800 (22.5 fps) - enc1: 268, enc2: 350, stitched: 516
+  Phase 8/10: Dismiss popup + scroll
+    69 frames, 3.0s, 23 fps, 11.2 vfps
+    UNCHANGED   :   35 ( 50.7%) |#########################.........................|
+    VIDEO_ONLY  :    1 (  1.4%) |..................................................|
+    CHANGED     :   33 ( 47.8%) |#######################...........................|
+
+[phase 9] Opening a second popup...
+[enc] Entering video overlay mode at frame 845
+[enc] Exiting video overlay mode at frame 849
+[enc] Entering video overlay mode at frame 850
+[enc] Frame 900 (22.4 fps) - enc1: 289, enc2: 399, stitched: 589
+[enc] Exiting video overlay mode at frame 939
+[enc] Entering video overlay mode at frame 941
+[enc] Exiting video overlay mode at frame 947
+[enc] Entering video overlay mode at frame 948
+[enc] Frame 1000 (22.6 fps) - enc1: 292, enc2: 487, stitched: 677
+  Popup #2: (870,-9) 341x348
+  Video #2: (870,-9) 341x192
+  Phase 9/10: Second popup opening
+    200 frames, 8.0s, 25 fps, 21.4 vfps, 2 dropped
+    UNCHANGED   :   28 ( 14.0%) |#######...........................................|
+    VIDEO_ONLY  :  149 ( 74.5%) |#####################################.............|
+    CHANGED     :   23 ( 11.5%) |#####.............................................|
+
+[phase 10] Steady video #2...
+[enc] Exiting video overlay mode at frame 1090
+[enc] Entering video overlay mode at frame 1091
+[enc] Frame 1100 (22.8 fps) - enc1: 293, enc2: 579, stitched: 769
+  Phase 10/10: Steady video #2
+    126 frames, 5.0s, 25 fps, 23.7 vfps
+    UNCHANGED   :    7 (  5.6%) |##................................................|
+    VIDEO_ONLY  :  118 ( 93.7%) |##############################################....|
+    CHANGED     :    1 (  0.8%) |..................................................|
+
+
+============================================================
+GRAND SUMMARY
+============================================================
+
+  Phase                                 Dur Frames   FPS  VFPS  UNCHG  VIDEO   CHGD  DROP
+  ----------------------------------- ----- ------ ----- ----- ------ ------ ------ -----
+  1. Hero video (top of page)           5.0    127    25  24.5   3.1%   0.0%  96.9%     2
+  2. Scroll past hero                   2.0     50    25  21.8  12.0%   0.0%  88.0%     0
+  3. Static baseline (no hover)         5.0     99    20   0.0 100.0%   0.0%   0.0%     0
+  4. Smooth scroll                      3.0     71    24  15.3  35.2%   0.0%  64.8%     0
+  5. Popup opening + video start        8.0    196    24  21.8  10.7%  79.6%   9.7%     6
+  6. Steady video playback              5.0    125    25  24.3   2.4%  96.8%   0.8%     0
+  7. Mouse wiggle over popup            3.0     76    25  24.9   1.3%  94.7%   3.9%     0
+  8. Dismiss popup + scroll             3.0     69    23  11.2  50.7%   1.4%  47.8%     0
+  9. Second popup opening               8.0    200    25  21.4  14.0%  74.5%  11.5%     2
+  10. Steady video #2                    5.0    126    25  23.7   5.6%  93.7%   0.8%     0
+  ----------------------------------- ----- ------ ----- ----- ------ ------ ------ -----
+  TOTAL                                47.2   1139        19.3  20.1%  54.2%  25.7%    10
+
+  Expected patterns:
+    Hero video:       high CHANGED (untracked video)
+    Scroll past hero: high CHANGED
+    Static baseline:  ~0% CHANGED (no video, no hover)
+    Scroll:           high CHANGED
+    Popup opening:    CHANGED -> VIDEO_ONLY transition
+    Steady video:     ~100% VIDEO_ONLY
+    Mouse wiggle:     mix of VIDEO_ONLY + CHANGED
+    Dismiss+scroll:   high CHANGED
+    Second popup:     CHANGED -> VIDEO_ONLY transition
+    Steady video #2:  ~100% VIDEO_ONLY
+
+============================================================
+
+======================================================================
+Netflix Encoder v4: Layer-Side Dual Encoder Summary
+======================================================================
+  Input frames:    1139
+  Output frames:   1100
+  Duration:        45.56 sec
+  Output size:     4,080,680 bytes
+  Bitrate:         0.717 Mbps
+
+  Frame Categories (input):
+    changed     :    293 ( 25.7%)
+    unchanged   :    229 ( 20.1%)
+    video_only  :    617 ( 54.2%)
+
+  Output Types:
+    encoder1_idr        :      1 (  0.1%)
+    encoder1_p          :    292 ( 26.5%)
+    stitched_pskip      :    190 ( 17.3%)
+    stitched_region     :    617 ( 56.1%)
+    vfr_skipped         :     39 (  3.5%)
+
+  Encoder 1 (Full-Frame, layer-side):
+    Total encodes:  293
+    IDR frames:     1
+    P frames:       292
+    LTR 0 refs:     292
+
+  Encoder 2 (Region, layer-side):
+    Total encodes:  617
+    IDR frames:     11
+    P frames:       606
+
+  Stitched frames:  807
+  VFR skipped:      39 (unchanged during video overlay)
+  VFR mode:         YES
+
+  Output: /home/wachtfogel/Projects/netflix_encoder/output/live_spliced.mkv
+  Metrics: /home/wachtfogel/Projects/netflix_encoder/output/metrics.json
+
+Playback:
+  ffplay /home/wachtfogel/Projects/netflix_encoder/output/live_spliced.mkv
+  python3 /home/wachtfogel/h264-newpoc/splicer/staging_player.py /home/wachtfogel/Projects/netflix_encoder/output/live_spliced.mkv
+
+
+================================================
+GPU Metrics Summary
+================================================
+  Elapsed Time:      63.63 seconds
+  Samples:           5
+
+  GPU Utilization:    33% (peak: 35%, baseline: 35%)
+  Memory:             22% (peak: 24%, baseline: 24%)
+                     2135 / 8192 MB used (baseline: 1974 MB)
+  NVENC Utilization:   0% (peak: 0%, baseline: 0%)
+  NVDEC Utilization:   0% (peak: 0%, baseline: 0%)
+  Temperature:       45°C (peak: 45°C, baseline: 44°C)
+  Power:             N/A (not supported on this GPU)
+================================================
