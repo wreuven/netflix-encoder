@@ -108,17 +108,22 @@ static int get_metrics(nvmlDevice_t device, gpu_metrics_t *metrics) {
         metrics->mem_util = 0;
     }
 
-    /* Query encoder/decoder utilization via nvidia-smi (more reliable than NVML direct calls) */
+    /* Query encoder/decoder utilization via NVML (now with correct signatures) */
     metrics->encoder_util = 0;
     metrics->decoder_util = 0;
-    FILE *smi = popen("nvidia-smi --query-gpu=utilization.encoder,utilization.decoder --format=csv,noheader 2>/dev/null", "r");
-    if (smi) {
-        unsigned int enc, dec;
-        if (fscanf(smi, "%u, %u", &enc, &dec) == 2) {
-            metrics->encoder_util = enc;
-            metrics->decoder_util = dec;
+
+    if (nvmlDeviceGetEncoderUtilization) {
+        unsigned int sampling_period = 0;
+        if (nvmlDeviceGetEncoderUtilization(device, &metrics->encoder_util, &sampling_period) != NVML_SUCCESS) {
+            metrics->encoder_util = 0;
         }
-        pclose(smi);
+    }
+
+    if (nvmlDeviceGetDecoderUtilization) {
+        unsigned int sampling_period = 0;
+        if (nvmlDeviceGetDecoderUtilization(device, &metrics->decoder_util, &sampling_period) != NVML_SUCCESS) {
+            metrics->decoder_util = 0;
+        }
     }
 
     metrics->power_available = 0;
