@@ -168,7 +168,7 @@ static void* monitor_thread_func(void *arg) {
 }
 
 /* Print metrics summary */
-static void print_summary(monitor_state_t *state, double elapsed_sec) {
+static void print_summary(monitor_state_t *state, gpu_metrics_t *baseline, double elapsed_sec) {
     printf("\n");
     printf("================================================\n");
     printf("GPU Metrics Summary\n");
@@ -176,16 +176,16 @@ static void print_summary(monitor_state_t *state, double elapsed_sec) {
     printf("  Elapsed Time:      %.2f seconds\n", elapsed_sec);
     printf("  Samples:           %u\n", state->sample_count);
     printf("\n");
-    printf("  GPU Utilization:   %3u%% (peak: %u%%)\n",
-           state->current.gpu_util, state->peak.gpu_util);
-    printf("  Memory:            %3u%% (peak: %u%%)\n",
-           state->current.mem_util, state->peak.mem_util);
-    printf("                     %lu / %lu MB used\n",
-           state->current.mem_used_mb, state->current.mem_total_mb);
+    printf("  GPU Utilization:   %3u%% (peak: %u%%, baseline: %u%%)\n",
+           state->current.gpu_util, state->peak.gpu_util, baseline->gpu_util);
+    printf("  Memory:            %3u%% (peak: %u%%, baseline: %u%%)\n",
+           state->current.mem_util, state->peak.mem_util, baseline->mem_util);
+    printf("                     %lu / %lu MB used (baseline: %lu MB)\n",
+           state->current.mem_used_mb, state->current.mem_total_mb, baseline->mem_used_mb);
     printf("  Power:             %u W (peak: %u W)\n",
            state->current.power_mw / 1000, state->peak.power_mw / 1000);
-    printf("  Temperature:       %u°C (peak: %u°C)\n",
-           state->current.temp_c, state->peak.temp_c);
+    printf("  Temperature:       %u°C (peak: %u°C, baseline: %u°C)\n",
+           state->current.temp_c, state->peak.temp_c, baseline->temp_c);
     printf("================================================\n");
 }
 
@@ -241,8 +241,19 @@ int main(int argc, char *argv[]) {
     char device_name[256];
     nvmlDeviceGetName(device, device_name, sizeof(device_name));
     printf("GPU: %s\n", device_name);
+
+    /* Get baseline reading */
+    gpu_metrics_t baseline;
+    get_metrics(device, &baseline);
+    printf("Baseline: GPU %3u%% | Mem %3u%% (%lu/%lu MB) | Temp %u°C\n",
+           baseline.gpu_util, baseline.mem_util,
+           baseline.mem_used_mb, baseline.mem_total_mb,
+           baseline.temp_c);
+
     if (period_sec > 0) {
         printf("Reporting every %u seconds...\n\n", period_sec);
+    } else {
+        printf("\n");
     }
 
     /* Start monitoring */
@@ -288,7 +299,7 @@ int main(int argc, char *argv[]) {
                          (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
 
     /* Print summary */
-    print_summary(&state, elapsed_sec);
+    print_summary(&state, &baseline, elapsed_sec);
 
     /* Cleanup */
     nvmlShutdown();
